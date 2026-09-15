@@ -1,9 +1,41 @@
 import { createServer } from "vite";
 import { mkdirSync, existsSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  parseBiomeMap,
+  buildTolkienSVG,
+  createRNG as createTolkienRNG,
+  generateMap,
+} from "../plugins/map-yard/index.js";
+// Renderer ÚNICO (scripts/worldSvg.mjs): el overlay Tolkien vive ahí, no en copias.
+import { generateWorldSVG, FLAVOR_SVG_GENERATE } from "./worldSvg.mjs";
 
 const projectRoot = new URL("..", import.meta.url).pathname;
-const seed = "init_world_004_11_09_2026";
+
+// CLI: --base=aia|yard --seed=... --width=N --height=N --no-tolkien
+// Salida única: map_year_0.html (el filtro Tolkien ya es genérico, vive en buildDemoWorld).
+const argv = process.argv.slice(2);
+const opt = (name, def) => {
+  const hit = argv.find((a) => a === name || a.startsWith(name + "="));
+  if (!hit) return def;
+  const eq = hit.indexOf("=");
+  return eq >= 0 ? hit.slice(eq + 1) : true;
+};
+const base = String(opt("--base", "aia")).toLowerCase(); // aia | yard
+const seedArg = opt("--seed", "init_world_004_11_09_2026");
+const yardWidth = parseInt(opt("--width", "1920"), 10);
+const yardHeight = parseInt(opt("--height", "1080"), 10);
+const skipTolkien = argv.includes("--no-tolkien");
 const nationCount = 6;
+
+function hashSeed(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+const numericSeed = /^\d+$/.test(String(seedArg)) ? parseInt(String(seedArg), 10) : hashSeed(String(seedArg));
 
 function nextExecutionNumber() {
   const execDir = `${projectRoot}target/images/svg_generate`;
@@ -25,175 +57,50 @@ const execNum = nextExecutionNumber();
 const outputDir = `${projectRoot}target/images/svg_generate/execution_${execNum}`;
 mkdirSync(outputDir, { recursive: true });
 
-const server = await createServer({
-  appType: "custom",
-  configFile: undefined,
-  logLevel: "error",
-  server: { middlewareMode: true },
-  root: "src",
-});
+// ---- main ----
+let world = null;
+if (base === "aia") {
+  const server = await createServer({
+    appType: "custom",
+    configFile: undefined,
+    logLevel: "error",
+    server: { middlewareMode: true },
+    root: "src",
+  });
+  const modules = await Promise.all([
+    server.ssrLoadModule("/world/buildDemoWorld.ts"),
+    server.ssrLoadModule("/world/modelConfig.ts"),
+  ]);
+  const buildDemoWorld = modules[0].buildDemoWorld;
+  const { buildDefaultNationModelConfigs } = modules[1];
+  world = buildDemoWorld(String(seedArg), { nationCount, provincesPerNation: 1 });
+  buildDefaultNationModelConfigs(world);
+  await server.close();
+}
 
-const modules = await Promise.all([
-  server.ssrLoadModule("/world/buildDemoWorld.ts"),
-  server.ssrLoadModule("/world/modelConfig.ts"),
-]);
-const buildDemoWorld = modules[0].buildDemoWorld;
-const { buildDefaultNationModelConfigs } = modules[1];
-
-const world = buildDemoWorld(seed, { nationCount, provincesPerNation: 1 });
-buildDefaultNationModelConfigs(world);
-
-function generateWorldSVG(world) {
-  const TILE_SIZE = 10;
-  const W = world.width + 2;
-  const H = world.height + 2;
-  const terrainColors = { ocean: "#315f8f", coast: "#4a89a8", plain: "#88a95f", forest: "#477457", hill: "#9a8d65", mountain: "#7d7f85", desert: "#c9b06b", lake: "#2e7d9e" };
-  const padding = 2;
-
-  const tileNationMap = new Map();
-  for (const province of world.provinces) {
-    if (!province.nationId) continue;
-    for (const tile of world.tiles) {
-      if (tile.provinceId === province.id) tileNationMap.set(`${tile.x},${tile.y}`, province.nationId);
-    }
+// ---- salida única: map_year_0.html ----
+if (base === "yard") {
+  const { html } = generateMap({ seed: numericSeed, width: yardWidth, height: yardHeight, tileSize: 8 });
+  let out = html;
+  if (!skipTolkien) {
+    const parsed = parseBiomeMap(html);
+    const rng = createTolkienRNG(numericSeed);
+    out = buildTolkienSVG(html, parsed.biomeMap, parsed.tileSize, rng, String(numericSeed), { width: yardWidth, height: yardHeight });
   }
-
-  const allTileKeys = new Set();
-  for (const tile of world.tiles) allTileKeys.add(`${tile.x},${tile.y}`);
-  for (const [tileKey] of tileNationMap) allTileKeys.delete(tileKey);
-
-  const nationTiles = {};
-  for (const [tileKey, nid] of tileNationMap) {
-    if (!nationTiles[nid]) nationTiles[nid] = [];
-    nationTiles[nid].push(tileKey);
-  }
-  if (allTileKeys.size > 0) nationTiles["__neutral__"] = [...allTileKeys];
-
-  const mapPixelW = W * TILE_SIZE;
-  const mapPixelH = H * TILE_SIZE;
-  let svg = `<svg id="map-svg" xmlns="http://www.w3.org/2000/svg" width="${mapPixelW}" height="${mapPixelH}" viewBox="0 0 ${mapPixelW} ${mapPixelH}" style="border:none;overflow:hidden;display:block;width:980px;height:660px">`;
-  svg += `<rect x="0" y="0" width="${mapPixelW}" height="${mapPixelH}" fill="#132028"/>`;
-
-  for (const tile of world.tiles) svg += `<rect x="${(padding + tile.x) * TILE_SIZE}" y="${(padding + tile.y) * TILE_SIZE}" width="${TILE_SIZE}" height="${TILE_SIZE}" fill="${terrainColors[tile.terrain] || "#333"}"/>`;
-    for (const tile of world.tiles) { if (tile.river) svg += `<rect x="${(padding + tile.x) * TILE_SIZE}" y="${(padding + tile.y) * TILE_SIZE}" width="${TILE_SIZE}" height="${TILE_SIZE}" fill="#1a5276" opacity="0.7"/>`; }
-
-  for (const nid of Object.keys(nationTiles).sort()) {
-    const nation = world.nationById.get(nid);
-    const color = nation ? nation.color : "#888";
-    const name = nation ? nation.name : "Neutral";
-    const opacity = nid === "__neutral__" ? 0.1 : 0.45;
-    svg += `<g id="nation-${nid}" data-name="${name}" data-color="${color}">`;
-    for (const tileKey of nationTiles[nid]) {
-      const [tx, ty] = tileKey.split(",").map(Number);
-      const sx = (padding + tx) * TILE_SIZE;
-      const sy = (padding + ty) * TILE_SIZE;
-      const isNeutral = nid === "__neutral__";
-      const strokeAttr = isNeutral ? "" : ` stroke="${color}" stroke-opacity="1" stroke-width="1"`;
-      svg += `<rect x="${sx}" y="${sy}" width="${TILE_SIZE}" height="${TILE_SIZE}" fill="${color}" opacity="${opacity}"${strokeAttr} data-nation="${nid}"/>`;
-      if (!isNeutral) {
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const ntx = tx + dx, nty = ty + dy;
-          const neighborNid = tileNationMap.get(`${ntx},${nty}`);
-          if (neighborNid !== nid) {
-            if (dx === 1) svg += `<line x1="${sx + TILE_SIZE}" y1="${sy}" x2="${sx + TILE_SIZE}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-opacity="1" stroke-width="2" data-nation="${nid}"/>`;
-            else if (dx === -1) svg += `<line x1="${sx}" y1="${sy}" x2="${sx}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-opacity="1" stroke-width="2" data-nation="${nid}"/>`;
-            else if (dy === 1) svg += `<line x1="${sx}" y1="${sy + TILE_SIZE}" x2="${sx + TILE_SIZE}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-opacity="1" stroke-width="2" data-nation="${nid}"/>`;
-            else if (dy === -1) svg += `<line x1="${sx}" y1="${sy}" x2="${sx + TILE_SIZE}" y2="${sy}" stroke="${color}" stroke-opacity="1" stroke-width="2" data-nation="${nid}"/>`;
-          }
-        }
-      }
-    }
-    svg += `</g>`;
-  }
-
-  svg += `
-  <defs>
-    <filter id="neon-glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-  </defs>
-  <g id="neon-borders" opacity="0">
-    ${Object.keys(nationTiles).filter(nid => nid !== "__neutral__").map(nid => {
-      const nation = world.nationById.get(nid);
-      if (!nation) return "";
-      const color = nation.color;
-      const tiles = nationTiles[nid];
-      let edges = [];
-      for (const tileKey of tiles) {
-        const [tx, ty] = tileKey.split(",").map(Number);
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const ntx = tx + dx, nty = ty + dy;
-          const neighborNid = tileNationMap.get(`${ntx},${nty}`);
-          if (neighborNid !== nid) {
-            const sx = (padding + tx) * TILE_SIZE;
-            const sy = (padding + ty) * TILE_SIZE;
-            if (dx === 1) edges.push(`<line x1="${sx + TILE_SIZE}" y1="${sy}" x2="${sx + TILE_SIZE}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-width="3" filter="url(#neon-glow)" data-nation="${nid}"/>`);
-            else if (dx === -1) edges.push(`<line x1="${sx}" y1="${sy}" x2="${sx}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-width="3" filter="url(#neon-glow)" data-nation="${nid}"/>`);
-            else if (dy === 1) edges.push(`<line x1="${sx}" y1="${sy + TILE_SIZE}" x2="${sx + TILE_SIZE}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-width="3" filter="url(#neon-glow)" data-nation="${nid}"/>`);
-            else if (dy === -1) edges.push(`<line x1="${sx}" y1="${sy}" x2="${sx + TILE_SIZE}" y2="${sy}" stroke="${color}" stroke-width="3" filter="url(#neon-glow)" data-nation="${nid}"/>`);
-          }
-        }
-      }
-      return edges.join("");
-    }).join("\n")}
-  </g>
-  <script>
-    var neonGroup = document.getElementById('neon-borders');
-    if (neonGroup) {
-      var opacity = 0.3;
-      var dir = 1;
-      setInterval(function() {
-        opacity += 0.02 * dir;
-        if (opacity > 0.8) { opacity = 0.8; dir = -1; }
-        if (opacity < 0.1) { opacity = 0.1; dir = 1; }
-        neonGroup.setAttribute('opacity', opacity);
-      }, 50);
-    }
-  <\/script>
-  `;
-
-  for (const city of world.cities) {
-    const x = city.x * TILE_SIZE + TILE_SIZE / 2, y = city.y * TILE_SIZE + TILE_SIZE / 2;
-    const nation = world.nationById.get(city.nationId);
-    svg += `<circle cx="${x}" cy="${y}" r="${city.isCapital ? 5 : 3}" fill="${nation ? nation.color : "#fff"}" opacity="0.9"/>`;
-  }
-
-  const deadNations = [];
-  for (const nation of world.nations) {
-    const capitalCity = nation.capitalCityId ? world.cityById.get(nation.capitalCityId) : undefined;
-    const capitalProvince = world.provinceById.get(nation.capitalProvinceId);
-    const cx = (capitalCity?.x ?? capitalProvince?.centerX) ?? 0;
-    const cy = (capitalCity?.y ?? capitalProvince?.centerY) ?? 0;
-    const capitalTileKey = `${cx},${cy}`;
-    const ownsCapitalTile = capitalCity && tileNationMap.get(capitalTileKey) === nation.id;
-    svg += `<text x="${cx * TILE_SIZE + TILE_SIZE * 0.7}" y="${cy * TILE_SIZE - TILE_SIZE * 0.9}" fill="#fff" font-size="12" font-weight="bold" stroke="none">${nation.name}</text>`;
-    if ((!ownsCapitalTile && world.cities.filter((c) => c.nationId === nation.id).length === 0) || world.provinces.filter((p) => p.nationId === nation.id).length === 0) {
-      deadNations.push(nation.id);
-      const bx = cx * TILE_SIZE + TILE_SIZE * 0.7;
-      const by = cy * TILE_SIZE - TILE_SIZE * 0.9;
-      svg += `<g id="dead-${nation.id}" transform="translate(${bx},${by})"><circle cx="0" cy="-2" r="7"/><circle cx="-3" cy="-4" r="2.5" fill="#1a1a1a"/><circle cx="3" cy="-4" r="2.5" fill="#1a1a1a"/><path d="M-2,2 Q0,5 2,2" fill="none" stroke="#1a1a1a" stroke-width="1"/><line x1="-5" y1="5" x2="-2" y2="9" stroke="#ff0000" stroke-width="2.5" stroke-linecap="round"/><line x1="5" y1="5" x2="2" y2="9" stroke="#ff0000" stroke-width="2.5" stroke-linecap="round"/></g>`;
-    }
-  }
-
+  writeFileSync(`${outputDir}/map_year_0.html`, out);
+  console.log(`Mapa yard generado: ${outputDir}/map_year_0.html`);
+} else {
+  const { svg: svgContent, deadNations, mapPixelW: fullW, mapPixelH: fullH } = generateWorldSVG(world, { ...FLAVOR_SVG_GENERATE, withTolkien: !skipTolkien });
   const hasDead = deadNations.length > 0;
   const nationList = world.nations.map(n => { const isDead = deadNations.includes(n.id); return `<label style="color:${isDead ? "#ff4444" : n.color};margin-right:16px;cursor:pointer"><input type="checkbox" checked onchange="toggleNation('${n.id}')"> ${isDead ? "💀 " + n.name : n.name}</label>`; }).join(" ") +
      (hasDead ? ` <label style="color:#ff4444;margin-right:16px;cursor:pointer"><input type="checkbox" checked onchange="toggleDead()"> 💀 Naciones Muertas</label>` : "");
-  svg += `</svg>`;
-  return { svg, deadNations, mapPixelW, mapPixelH };
-}
-
-const { svg: svgContent, deadNations, mapPixelW, mapPixelH } = generateWorldSVG(world);
-const hasDead = deadNations.length > 0;
-const nationList = world.nations.map(n => { const isDead = deadNations.includes(n.id); return `<label style="color:${isDead ? "#ff4444" : n.color};margin-right:16px;cursor:pointer"><input type="checkbox" checked onchange="toggleNation('${n.id}')"> ${isDead ? "💀 " + n.name : n.name}</label>`; }).join(" ") +
-   (hasDead ? ` <label style="color:#ff4444;margin-right:16px;cursor:pointer"><input type="checkbox" checked onchange="toggleDead()"> 💀 Naciones Muertas</label>` : "");
-const deadScript = hasDead ? `
+  const deadScript = hasDead ? `
 function toggleDead() {
   var checked = document.querySelector('input[onchange="toggleDead()"]').checked;
-  ${hasDead.map(id => `document.getElementById('dead-${id}').style.display = checked ? '' : 'none';`).join('\n')}
+  ${deadNations.map(id => `document.getElementById('dead-${id}').style.display = checked ? '' : 'none';`).join('\n')}
 }` : '';
 
-const htmlContent = `<!DOCTYPE html><html><head><style>
+  const htmlContent = `<!DOCTYPE html><html><head><style>
   body{margin:0;background:#132028;display:flex;justify-content:center;align-items:center;width:100vw;height:100vh;overflow:hidden;font-family:Arial,sans-serif}
   #map-container{position:relative;width:980px;height:660px;overflow:hidden}
   #map-svg{width:980px;height:660px;display:block;cursor:grab}
@@ -213,8 +120,8 @@ const htmlContent = `<!DOCTYPE html><html><head><style>
 <div id="zoom-controls"><button onclick="zoomIn()">+</button><button onclick="zoomOut()">-</button></div>
 <div id="nation-overlay">${nationList}</div>
 <script>
-  const mapPixelW = ${mapPixelW};
-  const mapPixelH = ${mapPixelH};
+  const mapPixelW = ${fullW};
+  const mapPixelH = ${fullH};
   const svg = document.getElementById('map-svg');
   const zoomPct = document.getElementById('zoom-pct');
   const zoomTiles = document.getElementById('zoom-tiles');
@@ -270,7 +177,8 @@ const htmlContent = `<!DOCTYPE html><html><head><style>
 <\/script>
 </body></html>`;
 
-writeFileSync(`${outputDir}/map_year_0.html`, htmlContent);
-await server.close();
-console.log(`Mapa generado: ${outputDir}/map_year_0.html`);
-console.log(`Naciones: ${world.nations.map(n => n.name).join(', ')}`);
+  writeFileSync(`${outputDir}/map_year_0.html`, htmlContent);
+  console.log(`Mapa generado: ${outputDir}/map_year_0.html`);
+  console.log(`Naciones: ${world.nations.map(n => n.name).join(', ')}`);
+  if (world.mapSkin && !skipTolkien) console.log(`Overlay genérico incrustado: ${Object.keys(world.mapSkin.biomeCounts).length} biomas, ts=${world.mapSkin.tileSize}`);
+}

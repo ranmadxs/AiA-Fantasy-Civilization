@@ -65,6 +65,21 @@ export type MapEdge = {
   nationId?: string;
 };
 
+export type RiverTrail = { x: number; y: number }[];
+
+export type MapSkin = {
+  baseSvg: string;
+  overlaySvg: string;
+  biomeCounts: Record<string, number>;
+  cols: number;
+  rows: number;
+  tileSize: number;
+  mapPixelW: number;
+  mapPixelH: number;
+  /** Nº de ríos reales dibujados (trails de generateRivers). */
+  riverCount: number;
+};
+
 export type World = {
   seed: string;
   width: number;
@@ -78,4 +93,8 @@ export type World = {
   cityById: Map<string, City>;
   provinceEdges: MapEdge[];
   nationEdges: MapEdge[];
+  /** Capa visual Tolkien/edge-blend. Opcional y cosmética: nunca afecta la simulación. */
+  mapSkin?: MapSkin;
+  /** Caminos ordenados de los ríos reales (generateRivers). Solo lectura para el skin. */
+  riverTrails?: RiverTrail[];
 };

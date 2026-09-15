@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Application, Container, Graphics, Text } from "pixi.js";
+import { Application, Container, Graphics, Text, Sprite, Assets } from "pixi.js";
 import { getTileMonthlyYield } from "../world/economy";
 import { getLocalizedName, localizeResource, type Language } from "../world/localization";
 import { isNationDefeated } from "../world/nationStatus";
+import { CapitalIconResolver } from "../world/capitalIcon";
+import { ResourceService } from "../world/resourceService";
 import type { MapEdge, Tile, World } from "../world/types";
 import type { ArmyGroup } from "../world/war";
+import type { EraState } from "../world/era";
 
 export type MapMode = "political" | "terrain" | "resources";
 
@@ -18,6 +21,7 @@ type WorldMapProps = {
   onSelectCity: (cityId: string) => void;
   onSelectProvince: (provinceId: string | undefined) => void;
   language: Language;
+  eraState: Record<string, EraState>;
 };
 
 type ResourceTooltip = {
@@ -64,6 +68,7 @@ export function WorldMap({
   selectedCityId,
   selectedProvinceId,
   language,
+  eraState,
 }: WorldMapProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -133,6 +138,7 @@ export function WorldMap({
         background: "#132028",
         resolution: window.devicePixelRatio || 1,
       });
+      ResourceService.getInstance().preloadAll();
 
       if (disposed) {
         pixiApp.destroy(true);
@@ -156,7 +162,7 @@ export function WorldMap({
       viewportRef.current = viewport;
       pixiApp.stage.addChild(viewport);
 
-      drawWorld(viewport, world, mapMode, tileByCoord, language);
+      drawWorld(viewport, world, mapMode, tileByCoord, language, eraState);
       const neonTravelLight = new Graphics();
       neonTravelLightRef.current = neonTravelLight;
       viewport.addChild(neonTravelLight);
@@ -369,7 +375,7 @@ export function WorldMap({
       }
       app?.destroy(true, { children: true });
     };
-  }, [world, mapMode, mapRevision, onSelectCity, onSelectProvince, tileByCoord, language]);
+  }, [world, mapMode, mapRevision, onSelectCity, onSelectProvince, tileByCoord, language, eraState]);
 
   useEffect(() => {
     const armies = armyGraphicsRef.current;
@@ -462,6 +468,7 @@ function drawWorld(
   mapMode: MapMode,
   tileByCoord: Map<string, Tile>,
   language: Language,
+  eraState: Record<string, EraState>,
 ) {
   const terrain = new Graphics();
   const ownership = new Graphics();
@@ -510,7 +517,7 @@ function drawWorld(
   drawNationEdges(nationBorderGlow, world.nationEdges, world, 4.4, 0.84);
   drawSolidEdges(nationBorders, world.nationEdges, 0xf8fbf1, 1.65, 0.94);
   if (mapMode === "political") {
-    drawCities(cities, cityLabels, world, language);
+    drawCities(cities, cityLabels, world, language, eraState);
   }
   drawNationLabels(nationLabels, world, language);
 
@@ -562,27 +569,58 @@ function cityAtPoint(x: number, y: number, world: World) {
   return nearestCityId;
 }
 
-function drawCities(graphics: Graphics, labels: Container, world: World, language: Language) {
+function drawCities(
+  graphics: Graphics,
+  labels: Container,
+  world: World,
+  language: Language,
+  eraState: Record<string, EraState>,
+) {
+  const resolver = CapitalIconResolver.getInstance();
+  const spriteCache = new Map<string, Sprite>();
+
   for (const city of world.cities) {
     const nation = world.nationById.get(city.nationId);
     const x = city.x * TILE_SIZE + TILE_SIZE / 2;
     const y = city.y * TILE_SIZE + TILE_SIZE / 2;
 
-    if (city.isCapital) {
-      graphics
-        .circle(x, y, 6.2)
-        .fill({ color: 0xf8fbf1, alpha: 0.96 })
-        .stroke({ color: nation?.numericColor ?? 0xf8fbf1, width: 2.8, alpha: 1 });
-      graphics.circle(x, y, 2.2).fill(nation?.numericColor ?? 0x10161b);
-
+    if (city.isCapital && nation) {
+      const iconOptions = resolver.getCapitalSpriteOptions(nation, eraState);
+      if (iconOptions) {
+        let sprite = spriteCache.get(iconOptions.era);
+        if (!sprite) {
+          const texture = Assets.get(iconOptions.path);
+          if (texture) {
+            sprite = new Sprite(texture);
+            sprite.anchor.set(0.5);
+            sprite.tint = iconOptions.tint;
+            sprite.scale.set(0.8);
+            sprite.x = x;
+            sprite.y = y;
+            labels.addChild(sprite);
+            spriteCache.set(iconOptions.era, sprite);
+          }
+        } else {
+          sprite.tint = iconOptions.tint;
+          sprite.x = x;
+          sprite.y = y;
+          labels.addChild(sprite);
+        }
+      }
       labels.addChild(createCityLabel(getLocalizedName(city, language), x + 7, y + 5, 11, 3));
       continue;
     }
 
-    graphics
-      .circle(x, y, 3.6)
-      .fill({ color: 0xf8fbf1, alpha: 0.9 })
-      .stroke({ color: nation?.numericColor ?? 0xf8fbf1, width: 1.8, alpha: 0.95 });
+    if (nation) {
+      graphics
+        .circle(x, y, 3.6)
+        .fill({ color: 0xf8fbf1, alpha: 0.9 })
+        .stroke({ color: nation.numericColor, width: 1.8, alpha: 0.95 });
+    } else {
+      graphics
+        .circle(x, y, 3.6)
+        .fill({ color: 0xf8fbf1, alpha: 0.9 });
+    }
     labels.addChild(createCityLabel(getLocalizedName(city, language), x + 5, y - 12, 9, 2.4));
   }
 }

@@ -1,6 +1,7 @@
-import type { City, MapEdge, Nation, Province, Resource, Terrain, Tile, World } from "./types";
+import type { City, MapEdge, Nation, Province, Resource, RiverTrail, Terrain, Tile, World } from "./types";
 import { resourceTypes } from "./economy";
 import { cityNames, governmentForms, nationNameBases, provinceNames } from "./nameCatalog";
+import { applyBaseMapSkin } from "./mapSkin";
 
 const width = 192;
 const height = 128;
@@ -42,7 +43,10 @@ export function buildDemoWorld(seed = defaultSeed, options: WorldGenerationOptio
   const seedHash = hashString(seed);
   const rng = mulberry32(seedHash);
   const requestedNationCount = clampInt(options.nationCount ?? defaultNationCount, 2, 12);
-  const tiles = buildTiles(seedHash);
+  const { tiles, riverTrails } = buildTiles(seedHash);
+  // ★ Skin visual Tolkien/edge-blend: solo lee tiles, no los muta.
+  // Provincias, recursos, naciones y ciudades quedan idénticos con y sin skin.
+  const mapSkin = applyBaseMapSkin(tiles, seedHash, { width, height }, riverTrails);
   const provinceSeeds = chooseProvinceSeeds(tiles, rng);
   const provinceNamePool = shuffled(provinceNames, mulberry32(seedHash ^ 0x51f15e));
   const provinces = buildProvinces(tiles, provinceSeeds, seedHash, provinceNamePool);
@@ -73,10 +77,12 @@ export function buildDemoWorld(seed = defaultSeed, options: WorldGenerationOptio
     cityById,
     provinceEdges,
     nationEdges,
+    mapSkin,
+    riverTrails,
   };
 }
 
-function buildTiles(seedHash: number): Tile[] {
+function buildTiles(seedHash: number): { tiles: Tile[]; riverTrails: RiverTrail[] } {
   const tiles: Tile[] = [];
 
   for (let y = 0; y < height; y += 1) {
@@ -95,15 +101,18 @@ function buildTiles(seedHash: number): Tile[] {
     }
   }
 
-  generateRivers(tiles, seedHash);
-  return tiles;
+  const riverTrails = generateRivers(tiles, seedHash);
+  return { tiles, riverTrails };
 }
-function generateRivers(tiles: Tile[], seedHash: number) {
+function generateRivers(tiles: Tile[], seedHash: number): RiverTrail[] {
   const tileMap = new Map<string, Tile>();
   for (const t of tiles) tileMap.set(`${t.x},${t.y}`, t);
   const numSources = Math.min(Math.floor(width * height * 0.002), 50);
   const rng = mulberry32(seedHash + 9999);
   const usedRiverTiles = new Set<string>();
+  // ★ Canal lateral solo-lectura: anota el camino ordenado de cada río.
+  // No consume rng extra ni cambia condiciones: tiles/provincias/recursos idénticos.
+  const trails: RiverTrail[] = [];
   for (let s = 0; s < numSources; s += 1) {
     const sx = Math.floor(rng() * width);
     const sy = Math.floor(rng() * height);
@@ -111,6 +120,7 @@ function generateRivers(tiles: Tile[], seedHash: number) {
     if (!startTile || startTile.terrain === "ocean" || startTile.elevation < 0.5) continue;
     let cx = sx, cy = sy;
     const maxSteps = 80;
+    const trail: RiverTrail = [];
     for (let step = 0; step < maxSteps; step += 1) {
       const key = `${cx},${cy}`;
       if (usedRiverTiles.has(key)) break;
@@ -119,6 +129,7 @@ function generateRivers(tiles: Tile[], seedHash: number) {
       if (tile.terrain === "ocean") break;
       usedRiverTiles.add(key);
       tile.river = true;
+      trail.push({ x: cx, y: cy });
       let lowestX = cx, lowestY = cy, lowestElev = tile.elevation;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
         const nx = cx + dx, ny = cy + dy;
@@ -135,7 +146,9 @@ function generateRivers(tiles: Tile[], seedHash: number) {
       cx = lowestX;
       cy = lowestY;
     }
+    if (trail.length > 0) trails.push(trail);
   }
+  return trails;
 }
 
 

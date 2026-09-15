@@ -324,6 +324,7 @@ export default function App() {
               onSelectCity={handleSelectCity}
               onSelectProvince={handleSelectProvince}
               language={language}
+              eraState={simulation.eraState}
             />
             <div className="scFrameRight" />
           </div>

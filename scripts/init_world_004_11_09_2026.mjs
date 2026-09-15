@@ -5,6 +5,10 @@ import { initLog, logLine } from "./loggerBase.mjs";
 
 import { createServer } from "vite";
 import { mkdirSync, existsSync, readdirSync, writeFileSync, readFileSync } from "node:fs";
+// Renderer ÚNICO (scripts/worldSvg.mjs): el overlay Tolkien genérico vive ahí.
+import { generateWorldSVG, FLAVOR_004 } from "./worldSvg.mjs";
+
+const skipTolkien = process.argv.includes("--no-tolkien");
 
 const projectRoot = new URL("..", import.meta.url).pathname;
 const seed = "init_world_004_11_09_2026";
@@ -140,86 +144,13 @@ function getNationData() {
   });
 }
 
-function generateWorldSVG(world) {
-  const TILE_SIZE = 10;
-  const W = world.width + 2; // Add padding on each side
-  const H = world.height + 2;
-  const terrainColors = { ocean: "#315f8f", coast: "#4a89a8", plain: "#88a95f", forest: "#477457", hill: "#9a8d65", mountain: "#7d7f85", desert: "#c9b06b", lake: "#2e7d9e" };
-  const padding = 2;
-
-  const tileNationMap = new Map();
-  for (const province of world.provinces) {
-    if (!province.nationId) continue;
-    for (const tile of world.tiles) {
-      if (tile.provinceId === province.id) tileNationMap.set(`${tile.x},${tile.y}`, province.nationId);
-    }
-  }
-
-  const allTileKeys = new Set();
-  for (const tile of world.tiles) allTileKeys.add(`${tile.x},${tile.y}`);
-  for (const [tileKey] of tileNationMap) allTileKeys.delete(tileKey);
-
-  const nationTiles = {};
-  for (const [tileKey, nid] of tileNationMap) {
-    if (!nationTiles[nid]) nationTiles[nid] = [];
-    nationTiles[nid].push(tileKey);
-  }
-  if (allTileKeys.size > 0) nationTiles["__neutral__"] = [...allTileKeys];
-
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W * TILE_SIZE}" height="${H * TILE_SIZE}" viewBox="0 0 ${W * TILE_SIZE} ${H * TILE_SIZE}" style="background: #1a2332;">`;
-  
-  for (const tile of world.tiles) svg += `<rect x="${(padding + tile.x) * TILE_SIZE}" y="${(padding + tile.y) * TILE_SIZE}" width="${TILE_SIZE}" height="${TILE_SIZE}" fill="${terrainColors[tile.terrain] || "#333"}"/>`;
-  for (const tile of world.tiles) { if (tile.river && tile.terrain !== "lake") { const rw = tile.riverWidth || 1; const rx = (padding + tile.x) * TILE_SIZE - (rw - 1) * TILE_SIZE / 2; svg += `<rect x="${rx}" y="${(padding + tile.y) * TILE_SIZE}" width="${rw * TILE_SIZE}" height="${TILE_SIZE}" fill="#1a5276" opacity="0.7"/>`; } }
-
-  for (const nid of Object.keys(nationTiles).sort()) {
-    const nation = world.nationById.get(nid);
-    const color = nation ? nation.color : "#888";
-    const isNeutral = nid === "__neutral__";
-    const opacity = isNeutral ? 0.05 : 0.3;
-    svg += `<g id="nation-${nid}">`;
-    for (const tileKey of nationTiles[nid]) {
-      const [tx, ty] = tileKey.split(",").map(Number);
-      const sx = (padding + tx) * TILE_SIZE;
-      const sy = (padding + ty) * TILE_SIZE;
-      svg += `<rect x="${sx}" y="${sy}" width="${TILE_SIZE}" height="${TILE_SIZE}" fill="${color}" opacity="${opacity}"/>`;
-      if (!isNeutral) {
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const ntx = tx + dx, nty = ty + dy;
-          const neighborNid = tileNationMap.get(`${ntx},${nty}`);
-          if (neighborNid !== nid) {
-            if (dx === 1) svg += `<line x1="${sx + TILE_SIZE}" y1="${sy}" x2="${sx + TILE_SIZE}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-opacity="1" stroke-width="2"/>`;
-            else if (dx === -1) svg += `<line x1="${sx}" y1="${sy}" x2="${sx}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-opacity="1" stroke-width="2"/>`;
-            else if (dy === 1) svg += `<line x1="${sx}" y1="${sy + TILE_SIZE}" x2="${sx + TILE_SIZE}" y2="${sy + TILE_SIZE}" stroke="${color}" stroke-opacity="1" stroke-width="2"/>`;
-            else if (dy === -1) svg += `<line x1="${sx}" y1="${sy}" x2="${sx + TILE_SIZE}" y2="${sy}" stroke="${color}" stroke-opacity="1" stroke-width="2"/>`;
-          }
-        }
-      }
-    }
-    svg += `</g>`;
-  }
-
-  for (const city of world.cities) {
-    const x = (padding + city.x) * TILE_SIZE + TILE_SIZE / 2, y = (padding + city.y) * TILE_SIZE + TILE_SIZE / 2;
-    const nation = world.nationById.get(city.nationId);
-    svg += `<circle cx="${x}" cy="${y}" r="${city.isCapital ? 5 : 3}" fill="${nation ? nation.color : "#fff"}" opacity="0.9"/>`;
-  }
-  for (const nation of world.nations) {
-    const capitalCity = nation.capitalCityId ? world.cityById.get(nation.capitalCityId) : undefined;
-    const capitalProvince = world.provinceById.get(nation.capitalProvinceId);
-    const cx = (padding + (capitalCity?.x ?? capitalProvince?.centerX ?? 0));
-    const cy = (padding + (capitalCity?.y ?? capitalProvince?.centerY ?? 0));
-    svg += `<text x="${cx * TILE_SIZE + TILE_SIZE * 0.7}" y="${cy * TILE_SIZE - TILE_SIZE * 0.9}" fill="#fff" font-size="12" font-weight="bold" stroke="none">${nation.name}</text>`;
-  }
-  svg += "</svg>";
-  return svg;
-}
-
 function monthToYear(month) { return Math.round(month / 12); }
 
 async function captureWorld(world, simulation, month) {
   const year = monthToYear(month);
   const htmlPath = `${outputDir}/map_year_${year}.html`;
-  const svgContent = generateWorldSVG(world);
+  // Renderer compartido: inyecta el overlay Tolkien genérico (world.mapSkin).
+  const { svg: svgContent } = generateWorldSVG(world, { ...FLAVOR_004, withTolkien: !skipTolkien });
   const TILE_SIZE = 10;
   const W = (world.width + 2) * TILE_SIZE;
   const H = (world.height + 2) * TILE_SIZE;

@@ -1,0 +1,10 @@
+{
+  "name": "@aia/map-yard",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Plugin de mapas fantasy (origen map-yard) para AiA-Fantasy-Civilization. ESM puro, sin symlinks.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}
