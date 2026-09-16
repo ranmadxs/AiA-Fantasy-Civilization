@@ -68,17 +68,9 @@ export class ResourceService {
     return [...AVAILABLE_ERAS];
   }
 
-  preloadAll(): void {
-    for (const era of AVAILABLE_ERAS) {
-      const path = this.getCapitalIconPath(era);
-      if (!this.loadedTextures.has(path)) {
-        PIXI.Assets.load(path).then((texture) => {
-          if (texture) {
-            this.loadedTextures.set(path, texture);
-          }
-        }).catch(() => {});
-      }
-    }
+  /** Precarga los 6 iconos de era. Awaited por WorldMap antes de dibujar. */
+  async preloadAll(): Promise<void> {
+    await Promise.allSettled(AVAILABLE_ERAS.map((era) => this.loadCapitalIcon(era)));
   }
 
   invalidate(era: string): void {

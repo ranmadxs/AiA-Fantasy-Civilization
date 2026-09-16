@@ -12,6 +12,7 @@
  * lógico es bit-idéntico al que se generaba antes de este módulo.
  */
 import type { RiverTrail, Tile } from "./types";
+import { debug } from "./debugLog";
 // @ts-ignore — plugin JS puro (allowJs:false); verificado en runtime vía svg_generate.mjs
 import { parseBiomeMap, buildTolkienSVG, createRNG } from "../../plugins/map-yard/index.js";
 
@@ -78,9 +79,13 @@ export function applyBaseMapSkin(
   const { svg: baseSvg, mapPixelW, mapPixelH } = buildCleanSvgString(tiles, dims.width, dims.height);
   const baseHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${baseSvg}</body></html>`;
 
-  const parsed = parseBiomeMap(baseHtml);
+  // El log heredado "Paleta detectada" solo sale con ?debug=1 (en consola normal: silencio).
+  debug.time("mapSkin:parseBiomeMap");
+  const parsed = parseBiomeMap(baseHtml, { quiet: !debug.enabled() });
+  debug.timeEnd("mapSkin:parseBiomeMap");
   const rng = createRNG((seedHash ^ SKIN_RNG_XOR) >>> 0);
   const terrainByCoord = new Map(tiles.map((t) => [`${t.x},${t.y}`, t.terrain]));
+  debug.time("mapSkin:buildTolkienSVG");
   const tolkienHtml: string = buildTolkienSVG(baseHtml, parsed.biomeMap, parsed.tileSize, rng, String(seedHash), {
     width: mapPixelW,
     height: mapPixelH,
@@ -88,6 +93,7 @@ export function applyBaseMapSkin(
     realTrails: trails,
     terrainAt: (x: number, y: number) => terrainByCoord.get(`${x},${y}`),
   });
+  debug.timeEnd("mapSkin:buildTolkienSVG");
 
   // Extrae solo el overlay: buildTolkienSVG = pre + body(sin ríos base) + overlay + post.
   // Como el body de entrada es exactamente baseSvg, el overlay es lo que sobra.

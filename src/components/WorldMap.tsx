@@ -5,9 +5,11 @@ import { getLocalizedName, localizeResource, type Language } from "../world/loca
 import { isNationDefeated } from "../world/nationStatus";
 import { CapitalIconResolver } from "../world/capitalIcon";
 import { ResourceService } from "../world/resourceService";
+import { debug } from "../world/debugLog";
 import type { MapEdge, Tile, World } from "../world/types";
 import type { ArmyGroup } from "../world/war";
 import type { EraState } from "../world/era";
+import { applyTolkienFilter, parseTolkienLayersParam } from "../world/tolkienRenderer";
 
 export type MapMode = "political" | "terrain" | "resources";
 
@@ -138,7 +140,8 @@ export function WorldMap({
         background: "#132028",
         resolution: window.devicePixelRatio || 1,
       });
-      ResourceService.getInstance().preloadAll();
+      // Iconos precargados y esperados: Assets.get ya no falla por carrera.
+      await ResourceService.getInstance().preloadAll();
 
       if (disposed) {
         pixiApp.destroy(true);
@@ -155,6 +158,14 @@ export function WorldMap({
       pixiApp.canvas.style.position = "";
       pixiApp.canvas.style.top = "";
       pixiApp.canvas.style.left = "";
+      // El canvas DEBE vivir dentro del host: sin esto se dibuja en un canvas
+      // invisible (bug del mapa negro). Guarda anti-remontaje de StrictMode.
+      if (pixiApp.canvas.parentElement !== host) {
+        host.prepend(pixiApp.canvas);
+      }
+      if (pixiApp.canvas.parentElement !== host || canvasW <= 0 || canvasH <= 0) {
+        debug.error("WorldMap: canvas no visible tras montar", { canvasW, canvasH });
+      }
 
       app = pixiApp;
       appRef.current = pixiApp;
@@ -163,6 +174,11 @@ export function WorldMap({
       pixiApp.stage.addChild(viewport);
 
       drawWorld(viewport, world, mapMode, tileByCoord, language, eraState);
+      // Filtro Tolkien SOLO en modo terreno: político y recursos van planos.
+      // Diagnóstico por URL: ?tolkien=off (plano puro) o ?tolkien=-coast,-sea, etc.
+      if (mapMode === "terrain") {
+        applyTolkienFilter(viewport, world, parseTolkienLayersParam());
+      }
       const neonTravelLight = new Graphics();
       neonTravelLightRef.current = neonTravelLight;
       viewport.addChild(neonTravelLight);
@@ -519,7 +535,7 @@ function drawWorld(
   if (mapMode === "political") {
     drawCities(cities, cityLabels, world, language, eraState);
   }
-  drawNationLabels(nationLabels, world, language);
+  drawNationLabels(nationLabels, world, language, mapMode);
 
   container.addChild(
     terrain,
@@ -577,7 +593,8 @@ function drawCities(
   eraState: Record<string, EraState>,
 ) {
   const resolver = CapitalIconResolver.getInstance();
-  const spriteCache = new Map<string, Sprite>();
+  // Caché de TEXTURAS por era (no de Sprites: un Sprite no puede estar en 2 capitales).
+  const textureCache = new Map<string, ReturnType<typeof Assets.get>>();
 
   for (const city of world.cities) {
     const nation = world.nationById.get(city.nationId);
@@ -586,26 +603,28 @@ function drawCities(
 
     if (city.isCapital && nation) {
       const iconOptions = resolver.getCapitalSpriteOptions(nation, eraState);
-      if (iconOptions) {
-        let sprite = spriteCache.get(iconOptions.era);
-        if (!sprite) {
-          const texture = Assets.get(iconOptions.path);
-          if (texture) {
-            sprite = new Sprite(texture);
-            sprite.anchor.set(0.5);
-            sprite.tint = iconOptions.tint;
-            sprite.scale.set(0.8);
-            sprite.x = x;
-            sprite.y = y;
-            labels.addChild(sprite);
-            spriteCache.set(iconOptions.era, sprite);
-          }
+      let texture = iconOptions ? textureCache.get(iconOptions.era) : undefined;
+      if (iconOptions && !texture) {
+        const t = Assets.get(iconOptions.path);
+        // Assets.get avisa en consola si falta; el fallback vectorial cubre ese caso.
+        if (t) {
+          texture = t;
+          textureCache.set(iconOptions.era, t);
         } else {
-          sprite.tint = iconOptions.tint;
-          sprite.x = x;
-          sprite.y = y;
-          labels.addChild(sprite);
+          debug.warn(`Capital sin textura en caché (fallback vectorial): ${iconOptions.path}`);
         }
+      }
+      if (iconOptions && texture) {
+        // Un Sprite NUEVO por capital (comparten textura, no instancia).
+        const sprite = new Sprite(texture);
+        sprite.anchor.set(0.5);
+        sprite.tint = iconOptions.tint;
+        sprite.scale.set(0.8);
+        sprite.x = x;
+        sprite.y = y;
+        labels.addChild(sprite);
+      } else {
+        graphics.circle(x, y, 4.5).fill({ color: 0xffd700, alpha: 0.95 });
       }
       labels.addChild(createCityLabel(getLocalizedName(city, language), x + 7, y + 5, 11, 3));
       continue;
@@ -830,16 +849,27 @@ function drawSelectedProvince(
   }
 }
 
-function drawNationLabels(container: Container, world: World, language: Language) {
+function drawNationLabels(container: Container, world: World, language: Language, mapMode: MapMode) {
   for (const nation of world.nations) {
     const isDefeated = isNationDefeated(world, nation.id);
     const hasNoTiles = world.provinces.filter((p) => p.nationId === nation.id).length === 0;
     const isDead = isDefeated || hasNoTiles;
 
-    const capitalCity = nation.capitalCityId ? world.cityById.get(nation.capitalCityId) : undefined;
-    const capitalProvince = world.provinceById.get(nation.capitalProvinceId);
-    const x = capitalCity?.x ?? capitalProvince?.centerX;
-    const y = capitalCity?.y ?? capitalProvince?.centerY;
+    // En modo político el nombre va al centro del territorio, grande y claro.
+    // En terreno/recursos se mantiene la etiqueta chica junto a la capital.
+    let x: number | undefined;
+    let y: number | undefined;
+    if (mapMode === "political" && !isDead) {
+      const centroid = nationTerritoryCentroid(world, nation.id);
+      x = centroid?.x;
+      y = centroid?.y;
+    }
+    if (x === undefined || y === undefined) {
+      const capitalCity = nation.capitalCityId ? world.cityById.get(nation.capitalCityId) : undefined;
+      const capitalProvince = world.provinceById.get(nation.capitalProvinceId);
+      x = capitalCity?.x ?? capitalProvince?.centerX;
+      y = capitalCity?.y ?? capitalProvince?.centerY;
+    }
     if (x === undefined || y === undefined) {
       if (isDead) {
         const label = new Text({
@@ -877,20 +907,42 @@ function drawNationLabels(container: Container, world: World, language: Language
       continue;
     }
 
+    const isCentered = mapMode === "political" && !isDead;
     const label = new Text({
       text: getLocalizedName(nation, language),
       style: {
         fill: 0xf8fbf1,
         fontFamily: "Arial",
-        fontSize: 15,
+        fontSize: isCentered ? 24 : 15,
         fontWeight: "700",
-        stroke: { color: 0x10161b, width: 4 },
+        stroke: { color: 0x10161b, width: isCentered ? 6 : 4 },
       },
     });
 
-    label.position.set(x * TILE_SIZE + TILE_SIZE * 0.7, y * TILE_SIZE - TILE_SIZE * 0.9);
+    if (isCentered) {
+      label.anchor.set(0.5);
+      label.position.set(x * TILE_SIZE, y * TILE_SIZE);
+    } else {
+      label.position.set(x * TILE_SIZE + TILE_SIZE * 0.7, y * TILE_SIZE - TILE_SIZE * 0.9);
+    }
     container.addChild(label);
   }
+}
+
+/** Centro del territorio: promedio de centros de provincia ponderado por tiles. */
+function nationTerritoryCentroid(world: World, nationId: string): { x: number; y: number } | undefined {
+  let sx = 0;
+  let sy = 0;
+  let weight = 0;
+  for (const province of world.provinces) {
+    if (province.nationId !== nationId) continue;
+    const w = Math.max(1, province.tileCount);
+    sx += province.centerX * w;
+    sy += province.centerY * w;
+    weight += w;
+  }
+  if (weight <= 0) return undefined;
+  return { x: sx / weight, y: sy / weight };
 }
 
 function drawSelectedCity(graphics: Graphics, cityId: string | undefined, world: World) {

@@ -85,7 +85,8 @@ function standardLookup(fill) {
   return biomeColorAlt[fill] || null;
 }
 
-export function parseBiomeMap(htmlContent) {
+export function parseBiomeMap(htmlContent, opts = {}) {
+  const quiet = opts.quiet === true; // quiet:true silencia el log (ruta browser vía mapSkin)
   const rectRegex = /<rect\s+x="(\d+)"\s+y="(\d+)"\s+width="(\d+)"\s+height="(\d+)"\s+fill="([^"]+)"\s*\/>/g;
   const circleRegex = /<circle\s+cx="(\d+\.?\d*)"\s+cy="(\d+\.?\d*)"\s+r="(\d+\.?\d*)"\s+fill="([^"]+)"[^>]*\/>/g;
   const rects = [];
@@ -119,7 +120,7 @@ export function parseBiomeMap(htmlContent) {
   const toBiome = useAia
     ? (fill) => PALETTE_AIA[fill] || null
     : standardLookup;
-  console.log(`Paleta detectada: ${useAia ? 'AiA-Fantasy' : 'map-yard'} (${useAia ? aiaHits : stdHits} celdas)`);
+  if (!quiet) console.log(`Paleta detectada: ${useAia ? 'AiA-Fantasy' : 'map-yard'} (${useAia ? aiaHits : stdHits} celdas)`);
 
   // Origen de la grilla (algunos mapas parten con padding, ej. x=20,y=20).
   // Se reporta pero las claves usan columnas absolutas para que

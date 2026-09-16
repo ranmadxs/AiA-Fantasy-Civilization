@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MapMode, WorldMap } from "./components/WorldMap";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { debug } from "./world/debugLog";
 import { MainMenu, type NewGameSettings } from "./components/MainMenu";
 import { NationModelConfiguration } from "./components/NationModelConfiguration";
 import { buildDemoWorld } from "./world/buildDemoWorld";
@@ -61,7 +63,10 @@ import {
 import { isNationDefeated } from "./world/nationStatus";
 import { localizeText, type Language } from "./world/localization";
 
+debug.installGlobalHandlers();
+debug.time("app:buildDemoWorld inicial");
 let world = buildDemoWorld();
+debug.timeEnd("app:buildDemoWorld inicial");
 const mapModes: { id: MapMode; label: string }[] = [
   { id: "political", label: "Political" },
   { id: "terrain", label: "Terrain" },
@@ -233,10 +238,12 @@ export default function App() {
   }, [cityReturnNationId]);
 
   const handleStartGame = useCallback((settings: NewGameSettings) => {
+    debug.time("app:buildDemoWorld nuevo juego");
     const nextWorld = buildDemoWorld(settings.seed, {
       cityCount: settings.cityCount,
       nationCount: settings.nationCount,
     });
+    debug.timeEnd("app:buildDemoWorld nuevo juego");
     const nextSimulation = createInitialSimulationState(nextWorld);
     world = nextWorld;
     simulationRef.current = nextSimulation;
@@ -314,6 +321,7 @@ export default function App() {
           </div>
           <div className="scFrameBody">
             <div className="scFrameLeft" />
+            <ErrorBoundary area="WorldMap">
             <WorldMap
               world={world}
               mapMode={mapMode}
@@ -326,6 +334,7 @@ export default function App() {
               language={language}
               eraState={simulation.eraState}
             />
+            </ErrorBoundary>
             <div className="scFrameRight" />
           </div>
           <div className="scFrameBottom">
