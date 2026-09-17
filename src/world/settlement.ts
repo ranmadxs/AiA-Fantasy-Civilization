@@ -1,3 +1,4 @@
+import { at } from "./rngService";
 import { calculateNationCityEconomy } from "./cityEconomy";
 import {
   addYield,
@@ -123,10 +124,10 @@ export function applyPopulationDynamics(
     );
     for (const city of world.cities.filter((city) => city.nationId === nation.id)) {
       const deathRate = atWar
-        ? 0.30 + seededRandom(world.seed, `death:${city.id}:${currentMonth}`, currentMonth) * 0.30
+        ? 0.30 + at(world.seed, `death:${city.id}:${currentMonth}`, currentMonth) * 0.30
         : clampRate(0.10, 0.02, world.seed, `death:${city.id}:${currentMonth}`, currentMonth);
       const birthRate = atWar
-        ? 0.002 + seededRandom(world.seed, `birth:${city.id}:${currentMonth}`, currentMonth) * 0.018
+        ? 0.002 + at(world.seed, `birth:${city.id}:${currentMonth}`, currentMonth) * 0.018
         : clampRate(0.15, 0.02, world.seed, `birth:${city.id}:${currentMonth}`, currentMonth);
       city.population = Math.max(
         0,
@@ -137,18 +138,8 @@ export function applyPopulationDynamics(
 }
 
 function clampRate(base: number, variance: number, seed: string, salt: string, currentMonth: number): number {
-  const value = base + (seededRandom(seed, salt, currentMonth) - 0.5) * 2 * variance;
+  const value = base + (at(seed, salt, currentMonth) - 0.5) * 2 * variance;
   return Math.max(0, value);
-}
-
-function seededRandom(seed: string, salt: string, currentMonth: number): number {
-  let hash = 2166136261;
-  const value = `${seed}:${salt}:${currentMonth}`;
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 4294967295;
 }
 
 function addResourceTotals(

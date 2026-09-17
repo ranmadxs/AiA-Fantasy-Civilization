@@ -1,4 +1,5 @@
 import type { World } from "./types";
+import { stream } from "./rngService";
 
 export type NationalCurrency = {
   nationId: string;
@@ -16,11 +17,12 @@ const CONVERSION_FEE_RATE = 0.02;
 
 export function buildInitialCurrencyState(world: World): CurrencyState {
   const nationalCurrencies: Record<string, NationalCurrency> = {};
+  const rng = stream(world.seed, "economy");
 
   for (const nation of world.nations) {
     const metalReserve: Record<string, number> = {};
     for (const resource of ["iron", "coal", "copper", "silver", "gold"]) {
-      metalReserve[resource] = Math.round(Math.random() * 500 + 100);
+      metalReserve[resource] = Math.round(rng() * 500 + 100);
     }
     const totalMetal = Object.values(metalReserve).reduce((a, b) => a + b, 0);
     const population = world.cities

@@ -1,7 +1,7 @@
 import { buildInitialDiplomacyState, evaluateDiplomaticProposalsWithEvents, executeDiplomacyPoliciesWithEvents, executePeacefulExpansion } from "./diplomacy";
 import { consumeResources, type HungerState } from "./hunger";
 import type { GameEvent } from "./events";
-import { isNationActive } from "./nationStatus";
+import { isNationActive, checkDominationVictory, getDomination } from "./nationStatus";
 import { advanceNationPolicies, buildInitialNationPolicies, type NationPolicyState } from "./policyAI";
 import { buildInitialNationRelations, type NationRelations } from "./relationships";
 import { applyPopulationDynamics, buildInitialNationStockpiles, settleNationStockpiles, type NationStockpile } from "./settlement";
@@ -19,6 +19,12 @@ import { enforceProvinceMilitaryLimits, handleDeserters } from "./provinceLimits
 import type { World } from "./types";
 import { advanceArmyGroups, advanceMilitaryEconomy, advanceWarSystem, buildInitialMilitaryState, type MilitaryState } from "./war";
 
+export type GameOverRecord = {
+  victorNationId: string;
+  month: number;
+  share: number;
+};
+
 export type SimulationState = {
   defeatedNations: Record<string, DefeatedNationRecord>;
   diplomacy: ReturnType<typeof buildInitialDiplomacyState>;
@@ -35,6 +41,7 @@ export type SimulationState = {
   eraState: Record<string, EraState>;
   chatLog: ChatState;
   currencyState: CurrencyState;
+  gameOver?: GameOverRecord;
 };
 
 export type DefeatedNationRecord = {
@@ -109,6 +116,7 @@ export async function advanceSimulationTurn(
         current.marketState.offers,
         world.nations.map((n) => n.id),
         turnNumber,
+        world.seed,
       ),
     },
   };
@@ -151,7 +159,7 @@ function processHunger(
   };
 }
 
-function resolveTurn(world: World, current: SimulationState, nextMonth: number): SimulationState {
+export function resolveTurn(world: World, current: SimulationState, nextMonth: number): SimulationState {
   const currentMonth = current.elapsedMonths;
   const nationStockpiles = settleNationStockpiles(world, current.nationStockpiles, 1);
   const nationPolicies = advanceNationPolicies(world, current.nationRelations, nationStockpiles, current.nationPolicies, currentMonth, nextMonth);
@@ -159,14 +167,18 @@ function resolveTurn(world: World, current: SimulationState, nextMonth: number):
   const spyUpdate = advanceSpyNetwork(current.spies, nationPolicies, current.nationRelations, world, nextMonth);
   const execution = executeDiplomacyPoliciesWithEvents(current.diplomacy, nationPolicies, world, nextMonth);
   const evaluation = evaluateDiplomaticProposalsWithEvents(execution.diplomacy, world, spyUpdate.relations, nextMonth);
-  const peacefulEvents = executePeacefulExpansion(world, nationPolicies, nationStockpiles, nextMonth);
-  const movementUpdate = advanceArmyGroups(world, evaluation.diplomacy, militaryEconomy.military, nextMonth);
+  const peacefulResult = executePeacefulExpansion(world, nationPolicies, nationStockpiles, nextMonth);
+  const peacefulEvents = peacefulResult.events;
+  const peacefulMapChanged = peacefulResult.mapChanged;
+  const movementUpdate = advanceArmyGroups(world, evaluation.diplomacy, militaryEconomy.military, nextMonth, militaryEconomy.stockpiles);
   const warUpdate = advanceWarSystem(world, evaluation.diplomacy, movementUpdate.military, spyUpdate.relations, spyUpdate.spyNetwork, militaryEconomy.stockpiles, nextMonth);
   applyPopulationDynamics(world, warUpdate.diplomacy, nextMonth);
 
   let updatedMilitary = warUpdate.military;
   const deserterUpdate = handleDeserters(world, updatedMilitary, nextMonth);
   updatedMilitary = deserterUpdate.military;
+
+  const marketEndResult = executeTransactions(current.marketState, nextMonth);
 
   const newEvents = [
     ...militaryEconomy.events,
@@ -177,27 +189,46 @@ function resolveTurn(world: World, current: SimulationState, nextMonth: number):
     ...warUpdate.events,
     ...peacefulEvents,
     ...deserterUpdate.events,
+    ...marketEndResult.events,
   ];
 
-  const marketEndResult = executeTransactions(current.marketState, nextMonth);
+  const marketState = marketEndResult.marketState;
 
   const newDefeatedNations = collectDefeatedNationRecords(current.defeatedNations, newEvents);
+  const gameOver = current.gameOver ?? (() => {
+    const victorNationId = checkDominationVictory(world);
+    if (!victorNationId) {
+      return undefined;
+    }
+    const { shares } = getDomination(world);
+    const victoryEvent: GameEvent = {
+      id: `event-domination-victory-${victorNationId}-${nextMonth}`,
+      month: nextMonth,
+      kind: "nation_defeated",
+      title: "World Dominated",
+      description: `${world.nationById.get(victorNationId)?.name ?? victorNationId} dominates ${Math.round((shares[victorNationId] ?? 0) * 100)}% of claimed land and wins the game.`,
+      nationIds: [victorNationId],
+    };
+    newEvents.push(victoryEvent);
+    return { victorNationId, month: nextMonth, share: shares[victorNationId] ?? 0 };
+  })();
   return {
     defeatedNations: newDefeatedNations,
     diplomacy: warUpdate.diplomacy,
     elapsedMonths: nextMonth,
-    events: [...current.events, ...newEvents].slice(-240),
-    mapRevision: current.mapRevision + (warUpdate.mapChanged || movementUpdate.mapChanged ? 1 : 0),
+    events: [...current.events, ...newEvents],
+    mapRevision: current.mapRevision + (warUpdate.mapChanged || movementUpdate.mapChanged || peacefulMapChanged ? 1 : 0),
     military: updatedMilitary,
     nationPolicies,
     nationRelations: warUpdate.relations,
     nationStockpiles: warUpdate.stockpiles,
     spies: spyUpdate.spyNetwork,
-    marketState: marketEndResult.marketState,
+    marketState,
     hungerState: current.hungerState,
     eraState: current.eraState,
     chatLog: current.chatLog,
     currencyState: current.currencyState,
+    gameOver,
   };
 }
 

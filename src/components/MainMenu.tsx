@@ -6,7 +6,11 @@ export type NewGameSettings = {
   cityCount: number;
   nationCount: number;
   seed: string;
+  /** Proporción de provincias libres (0–0.5). Siempre activa, no opcional. */
+  freeProvinceRatio: number;
 };
+
+export const DEFAULT_FREE_PROVINCE_RATIO = 0.2;
 
 type MainMenuProps = {
   language: Language;
@@ -26,6 +30,7 @@ export function MainMenu({
   const [seed, setSeed] = useState(DEFAULT_SEED);
   const [nationCount, setNationCount] = useState(6);
   const [cityCount, setCityCount] = useState(36);
+  const [freeProvinceRatio, setFreeProvinceRatio] = useState(DEFAULT_FREE_PROVINCE_RATIO);
 
   const handleNationCountChange = (value: number) => {
     const nextNationCount = clampInteger(value, 2, 12);
@@ -38,10 +43,12 @@ export function MainMenu({
     const normalizedSeed = seed.trim() || DEFAULT_SEED;
     const normalizedNationCount = clampInteger(nationCount, 2, 12);
     const normalizedCityCount = clampInteger(cityCount, normalizedNationCount, 100);
+    const normalizedFreeRatio = Math.min(0.5, Math.max(0, Number.isFinite(freeProvinceRatio) ? freeProvinceRatio : DEFAULT_FREE_PROVINCE_RATIO));
     onStartGame({
       cityCount: normalizedCityCount,
       nationCount: normalizedNationCount,
       seed: normalizedSeed,
+      freeProvinceRatio: Math.round(normalizedFreeRatio * 100) / 100,
     });
   };
 
@@ -119,11 +126,23 @@ export function MainMenu({
                 />
                 <small>{nationCount}–100 cities</small>
               </label>
+              <label className="newGameField">
+                <span>Free Territory</span>
+                <input
+                  max={50}
+                  min={0}
+                  onChange={(event) => setFreeProvinceRatio(Number(event.target.value) / 100)}
+                  step={5}
+                  type="range"
+                  value={Math.round(freeProvinceRatio * 100)}
+                />
+                <small>{Math.round(freeProvinceRatio * 100)}% free provinces (Tierra libre)</small>
+              </label>
             </div>
 
             <div className="newGameSummary">
               <span>World Preview</span>
-              <strong>{nationCount} nations · {cityCount} cities</strong>
+              <strong>{nationCount} nations · {cityCount} cities · {Math.round(freeProvinceRatio * 100)}% free</strong>
             </div>
 
             <button className="menuPrimaryButton" type="submit">

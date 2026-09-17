@@ -1119,6 +1119,127 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.eventTopTabs {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.eventSubTabs {
+  margin-top: 6px;
+}
+
+.eventSubTabs button {
+  min-height: 28px;
+  font-size: 11px;
+}
+
+.spyBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(185 133 232 / 45%);
+  border-radius: 20px;
+  color: #d9c6f2;
+  background: rgb(185 133 232 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.logisticsBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(216 157 53 / 45%);
+  border-radius: 20px;
+  color: #f0d49a;
+  background: rgb(216 157 53 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.eventRow.spyEvent {
+  border-color: rgb(185 133 232 / 45%);
+}
+
+.combatBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(212 97 95 / 50%);
+  border-radius: 20px;
+  color: #f2b8b5;
+  background: rgb(212 97 95 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.eventRow.combatEvent {
+  border-color: rgb(212 97 95 / 55%);
+}
+
+.diplomaciaBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(96 165 250 / 45%);
+  border-radius: 20px;
+  color: #bfdbfe;
+  background: rgb(96 165 250 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.expansionesBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(74 222 128 / 45%);
+  border-radius: 20px;
+  color: #bbf7d0;
+  background: rgb(74 222 128 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.eventRow.diplomaciaEvent {
+  border-color: rgb(96 165 250 / 45%);
+}
+
+.eventRow.expansionesEvent {
+  border-color: rgb(74 222 128 / 45%);
+}
+
+.eventRow.logisticsEvent {
+  border-color: rgb(216 157 53 / 55%);
+}
+
+.eventRow.market {
+  border-color: rgb(88 166 255 / 40%);
+}
+
+.marketOfferBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(59 130 246 / 45%);
+  border-radius: 20px;
+  color: #bfdbfe;
+  background: rgb(59 130 246 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.marketTransactionBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(245 158 11 / 45%);
+  border-radius: 20px;
+  color: #fde68a;
+  background: rgb(245 158 11 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
 .eventNationSelector,
 .eventListSection {
   min-width: 0;
@@ -1255,6 +1376,72 @@ select {
   border-color: rgb(212 97 95 / 40%);
 }
 
+.eventRow.war_continued {
+  border-color: rgb(212 97 95 / 65%);
+}
+
+.eventRow.levy_called {
+  border-color: rgb(216 157 53 / 55%);
+}
+
+.victoryBanner {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgb(232 198 106 / 55%);
+  border-radius: 8px;
+  background: rgb(232 198 106 / 10%);
+}
+
+.victoryBanner strong {
+  color: #f3dfa8;
+  font-size: 14px;
+}
+
+.victoryBanner span {
+  color: #b9c8c1;
+  font-size: 12px;
+}
+
+.victoryOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(10 14 18 / 72%);
+}
+
+.victoryCard {
+  display: grid;
+  gap: 10px;
+  max-width: 420px;
+  padding: 28px 32px;
+  border: 1px solid rgb(232 198 106 / 60%);
+  border-radius: 12px;
+  background: #141d22;
+  box-shadow: 0 12px 48px rgb(0 0 0 / 60%);
+  text-align: center;
+}
+
+.victoryCard h1 {
+  color: #f3dfa8;
+  font-size: 26px;
+}
+
+.victoryCard p {
+  color: #b9c8c1;
+  font-size: 13px;
+}
+
+.victoryActions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 6px;
+}
+
 .eventRow.battle_fought,
 .eventRow.province_occupied,
 .eventRow.city_lost,
@@ -1284,6 +1471,10 @@ select {
 .eventRow.vassalage_signed,
 .eventRow.vassalage_broken {
   border-color: rgb(185 133 232 / 38%);
+}
+
+.eventRow.peaceful_expand {
+  border-color: rgb(105 190 120 / 42%);
 }
 
 .scFrame {
@@ -1858,6 +2049,7 @@ h2 {
 
 .resourceMark,
 .cityMark,
+.freeMark,
 .nationList span,
 .nationButton span {
   display: inline-block;
@@ -1876,6 +2068,10 @@ h2 {
   border-radius: 50%;
   background: #f8fbf1;
   box-shadow: 0 0 0 2px #4d8bff;
+}
+
+.freeMark {
+  background: rgb(154 163 168 / 45%);
 }
 
 .nationList span,

@@ -16,12 +16,11 @@ export const DEATH_TIME_WATER_HOURS = 72;
 export const DEATH_TIME_GRAIN_MONTHS = 2;
 
 export function calculateGlobalConsumption(world: World): { foodConsumption: number; waterConsumption: number } {
+  // Fuente única de población: las ciudades (Province no tiene campo population;
+  // sumarlo además contaría doble y producía NaN).
   let totalPopulation = 0;
   for (const city of world.cities) {
     totalPopulation += city.population;
-  }
-  for (const province of world.provinces) {
-    totalPopulation += province.population;
   }
   return {
     foodConsumption: totalPopulation * CONSUMPTION_PER_PERSON.grain,

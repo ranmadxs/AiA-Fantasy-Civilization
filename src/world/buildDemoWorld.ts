@@ -2,6 +2,7 @@ import type { City, MapEdge, Nation, Province, Resource, RiverTrail, Terrain, Ti
 import { resourceTypes } from "./economy";
 import { cityNames, governmentForms, nationNameBases, provinceNames } from "./nameCatalog";
 import { applyBaseMapSkin } from "./mapSkin";
+import { hashString, mulberry32, randomAt } from "./rngService";
 
 const width = 192;
 const height = 128;
@@ -14,6 +15,7 @@ export type WorldGenerationOptions = {
   cityCount?: number;
   nationCount?: number;
   provincesPerNation?: number;
+  freeProvinceRatio?: number;
 };
 
 const nationColors = [
@@ -46,16 +48,18 @@ export function buildDemoWorld(seed = defaultSeed, options: WorldGenerationOptio
   const { tiles, riverTrails } = buildTiles(seedHash);
   // ★ Skin visual Tolkien/edge-blend: solo lee tiles, no los muta.
   // Provincias, recursos, naciones y ciudades quedan idénticos con y sin skin.
-  const mapSkin = applyBaseMapSkin(tiles, seedHash, { width, height }, riverTrails);
+  const mapSkin = applyBaseMapSkin(tiles, seed, { width, height }, riverTrails);
   const provinceSeeds = chooseProvinceSeeds(tiles, rng);
   const provinceNamePool = shuffled(provinceNames, mulberry32(seedHash ^ 0x51f15e));
   const provinces = buildProvinces(tiles, provinceSeeds, seedHash, provinceNamePool);
   const capitals = chooseCapitalProvinces(provinces, rng, requestedNationCount);
   const nations = buildNations(capitals, rng);
-   assignNationsToProvinces(provinces, capitals, nations, seedHash);
+   assignNationsToProvinces(provinces, capitals, nations, seedHash, options.freeProvinceRatio ?? 0);
    if (options.provincesPerNation && options.provincesPerNation > 0) {
      limitProvincesPerNation(provinces, nations, options.provincesPerNation);
    }
+   // Al inicio cada nación queda en un bloque contiguo (fragmentar ya es cosa de guerras).
+   enforceStartingContiguity(tiles, provinces, nations);
    ensureNationResourceCoverage(tiles, provinces, nations, seedHash);
 
   const provinceById = new Map(provinces.map((province) => [province.id, province]));
@@ -302,8 +306,30 @@ function assignNationsToProvinces(
   capitals: Province[],
   nations: Nation[],
   seedHash: number,
-) {
+  freeRatio: number = 0,
+): void {
+  const capitalIds = new Set(capitals.map((c) => c.id));
+  const freeCount = Math.floor(provinces.length * freeRatio);
+  const freeSet = new Set<string>();
+  let freed = 0;
   for (const province of provinces) {
+    if (freed >= freeCount) break;
+    if (capitalIds.has(province.id)) continue;
+    freeSet.add(province.id);
+    freed++;
+  }
+
+  for (const capital of capitals) {
+    const province = provinces.find((p) => p.id === capital.id);
+    if (province) province.nationId = nations[capitals.indexOf(capital)].id;
+  }
+
+  for (const province of provinces) {
+    if (capitalIds.has(province.id)) continue;
+    if (freeSet.has(province.id)) {
+      province.nationId = undefined;
+      continue;
+    }
     let bestCapital = capitals[0];
     let bestScore = Number.POSITIVE_INFINITY;
 
@@ -325,6 +351,56 @@ function assignNationsToProvinces(
     }
 
     province.nationId = nations[capitals.indexOf(bestCapital)].id;
+  }
+}
+
+/** Al inicio cada nación ocupa un bloque contiguo: los exclaves se liberan a tierra libre. */
+export function enforceStartingContiguity(
+  tiles: Tile[],
+  provinces: Province[],
+  nations: Nation[],
+): void {
+  const tileByCoord = new Map(tiles.map((tile) => [`${tile.x},${tile.y}`, tile]));
+  const provinceById = new Map(provinces.map((province) => [province.id, province]));
+  const neighbors = new Map<string, Set<string>>();
+  const link = (a: string, b: string) => {
+    if (a === b) return;
+    let set = neighbors.get(a);
+    if (!set) {
+      set = new Set();
+      neighbors.set(a, set);
+    }
+    set.add(b);
+  };
+  for (const tile of tiles) {
+    if (!tile.provinceId) continue;
+    for (const [dx, dy] of [[1, 0], [0, 1]] as const) {
+      const other = tileByCoord.get(`${tile.x + dx},${tile.y + dy}`);
+      if (!other?.provinceId) continue;
+      link(tile.provinceId, other.provinceId);
+      link(other.provinceId, tile.provinceId);
+    }
+  }
+
+  for (const nation of nations) {
+    const capital = provinces.find((p) => p.id === nation.capitalProvinceId && p.nationId === nation.id);
+    if (!capital) continue;
+    const reached = new Set<string>([capital.id]);
+    const queue = [capital.id];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const next of neighbors.get(current) ?? []) {
+        if (reached.has(next)) continue;
+        if (provinceById.get(next)?.nationId !== nation.id) continue;
+        reached.add(next);
+        queue.push(next);
+      }
+    }
+    for (const province of provinces) {
+      if (province.nationId === nation.id && !reached.has(province.id)) {
+        province.nationId = undefined;
+      }
+    }
   }
 }
 
@@ -898,31 +974,7 @@ function noise2D(x: number, y: number, seed: number) {
   const ix0 = lerp(n00, n10, sx);
   const ix1 = lerp(n01, n11, sx);
 
-  return lerp(ix0, ix1, sy);
-}
-
-function randomAt(x: number, y: number, seed: number) {
-  let h = seed ^ Math.imul(x, 374761393) ^ Math.imul(y, 668265263);
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
-}
-
-function hashString(value: string) {
-  let hash = 2166136261;
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
-}
-
-function mulberry32(seed: number) {
-  return () => {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+   return lerp(ix0, ix1, sy);
 }
 
 function smoothstep(value: number) {

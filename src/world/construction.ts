@@ -1,5 +1,6 @@
 import type { City, World } from "./types";
 import { getBuildCost, getBuildTime, type EraState, ERA_CONFIGS } from "./era";
+import { at } from "./rngService";
 
 export type ConstructionProject = {
   id: string;
@@ -18,18 +19,20 @@ export function createConstructionProject(
   provinceId: string,
   era: string,
   isCapital: boolean,
+  seed: string,
+  currentMonth: number,
 ): ConstructionProject {
   const cost = getBuildCost(era, isCapital);
   const buildTime = getBuildTime(era);
   return {
-    id: `construction-${nationId}-${provinceId}-${Date.now()}`,
+    id: `construction-${nationId}-${provinceId}-${at(seed, `construction:${provinceId}`, currentMonth)}`,
     nationId,
     provinceId,
     era,
     cost,
     remainingTurns: buildTime,
     status: "building",
-    startedAt: 0,
+    startedAt: currentMonth,
   };
 }
 

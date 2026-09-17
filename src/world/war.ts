@@ -1,5 +1,6 @@
 import { calculateNationCityEconomy } from "./cityEconomy";
 import { calculateProvinceMilitaryLimit, getAvailableArmySize, hasCitiesForArmy } from "./provinceLimits";
+import { at } from "./rngService";
 import type { DiplomacyState, WarState } from "./diplomacy";
 import type { GameEvent } from "./events";
 import { isNationActive, isNationDefeated } from "./nationStatus";
@@ -14,7 +15,7 @@ import type { NationStockpiles } from "./settlement";
 import type { Province, Resource, Terrain, Tile, World } from "./types";
 import type { SpyNetwork } from "./spies";
 
-export type UnitType = "militia" | "infantry" | "lightCavalry" | "heavyCavalry";
+export type UnitType = "militia" | "infantry" | "lightCavalry" | "heavyCavalry" | "levy";
 
 export type UnitStats = {
   label: string;
@@ -110,7 +111,7 @@ export type NationWarSummary = {
   defensePower: number;
 };
 
-export const unitTypes: UnitType[] = ["militia", "infantry", "lightCavalry", "heavyCavalry"];
+export const unitTypes: UnitType[] = ["militia", "infantry", "lightCavalry", "heavyCavalry", "levy"];
 
 export const unitStats: Record<UnitType, UnitStats> = {
   militia: {
@@ -149,6 +150,15 @@ export const unitStats: Record<UnitType, UnitStats> = {
     speed: 2,
     upkeepGold: 0.07065,
   },
+  levy: {
+    attack: 2,
+    defense: 2,
+    hp: 30,
+    label: "Levy",
+    recruitGold: 0.015,
+    speed: 1,
+    upkeepGold: 0.0005,
+  },
 };
 
 const unitRecruitResourceCosts: Record<UnitType, Partial<Record<Resource, number>>> = {
@@ -156,6 +166,7 @@ const unitRecruitResourceCosts: Record<UnitType, Partial<Record<Resource, number
   infantry: { grain: 1.1, iron: 0.45, timber: 0.15 },
   lightCavalry: { grain: 1.6, iron: 0.25, timber: 0.45 },
   militia: { grain: 0.75, timber: 0.1 },
+  levy: { grain: 0.2 },
 };
 
 const unitMonthlyResourceUpkeep: Record<UnitType, Partial<Record<Resource, number>>> = {
@@ -163,6 +174,7 @@ const unitMonthlyResourceUpkeep: Record<UnitType, Partial<Record<Resource, numbe
   infantry: { grain: 0.051, timber: 0.027, iron: 0.05225, coal: 0.2 },
   lightCavalry: { grain: 0.13, timber: 0.018 },
   militia: { grain: 0.055 },
+  levy: { grain: 0.02 },
 };
 
 const truceAfterWarMonths = 60;
@@ -308,6 +320,7 @@ export function advanceArmyGroups(
   diplomacy: DiplomacyState,
   currentMilitary: MilitaryState,
   currentMonth: number,
+  stockpiles?: NationStockpiles,
 ): MilitaryMovementUpdate {
   const events: GameEvent[] = [];
   let mapChanged = false;
@@ -332,7 +345,7 @@ export function advanceArmyGroups(
       army.lastArmyCommandMonth === undefined ||
       currentMonth - army.lastArmyCommandMonth >= armyCommandIntervalMonths
     ) {
-      const commandResult = issueArmyCommands(world, diplomacy, army, currentMonth);
+      const commandResult = issueArmyCommands(world, diplomacy, army, currentMonth, stockpiles);
       army = commandResult.army;
       army.lastArmyCommandMonth = currentMonth;
       events.push(...commandResult.events);
@@ -431,17 +444,31 @@ export function advanceWarSystem(
     if (engagements.length === 0) {
       if (
         !hasWarFront(world, updatedWar.attackerNationId, updatedWar.defenderNationId) ||
-        !hasReachableWarObjective(world, nextMilitary, updatedWar)
+        !hasReachableWarObjective(world, nextMilitary, updatedWar, diplomacy)
       ) {
-        events.push(buildWarEvent({
-          currentMonth,
-          description: `${attacker.name} and ${defender.name} signed a truce after their armies could no longer reach a viable front.`,
-          id: `event-war-ended-no-front-${updatedWar.id}-${currentMonth}`,
-          kind: "war_ended",
-          nationIds: [attacker.id, defender.id],
-          title: "War Ended",
-        }));
-        relations = adjustNationRelation(relations, attacker.id, defender.id, -4, currentMonth);
+        if (defenderContinuesWar(world, diplomacy, nextMilitary, relations, updatedWar)) {
+          const flipped = flipWarAttacker(updatedWar);
+          events.push(buildWarEvent({
+            currentMonth,
+            description: `${defender.name} refuses the truce and takes the offensive against ${attacker.name}. ${warDeclineReport(world, nextMilitary, diplomacy, updatedWar, "no-front", currentMonth)}`,
+            id: `event-war-continued-${updatedWar.id}-${currentMonth}`,
+            kind: "war_continued",
+            nationIds: [flipped.attackerNationId, flipped.defenderNationId],
+            title: "War Continued",
+          }));
+          relations = adjustNationRelation(relations, attacker.id, defender.id, -2, currentMonth);
+          nextWars.push(flipped);
+        } else {
+          events.push(buildWarEvent({
+            currentMonth,
+            description: `${attacker.name} and ${defender.name} signed a truce: no viable front. ${warDeclineReport(world, nextMilitary, diplomacy, updatedWar, "no-front", currentMonth)}`,
+            id: `event-war-ended-no-front-${updatedWar.id}-${currentMonth}`,
+            kind: "war_ended",
+            nationIds: [attacker.id, defender.id],
+            title: "War Ended",
+          }));
+          relations = adjustNationRelation(relations, attacker.id, defender.id, -4, currentMonth);
+        }
         continue;
       }
       nextWars.push(updatedWar);
@@ -548,15 +575,29 @@ export function advanceWarSystem(
       };
 
       if (shouldEndWar(updatedWar, nextMilitary[attacker.id], nextMilitary[defender.id])) {
-        events.push(buildWarEvent({
-          currentMonth,
-          description: `${attacker.name} and ${defender.name} agreed to an ${truceAfterWarMonths}-month truce after sustained fighting.`,
-          id: `event-war-ended-${updatedWar.id}-${currentMonth}`,
-          kind: "war_ended",
-          nationIds: [attacker.id, defender.id],
-          title: "War Ended",
-        }));
-        relations = adjustNationRelation(relations, attacker.id, defender.id, -4, currentMonth);
+        if (defenderContinuesWar(world, diplomacy, nextMilitary, relations, updatedWar)) {
+          const flipped = flipWarAttacker(updatedWar);
+          events.push(buildWarEvent({
+            currentMonth,
+            description: `${defender.name} refuses the truce and takes the offensive against ${attacker.name}. ${warDeclineReport(world, nextMilitary, diplomacy, updatedWar, "decisive", currentMonth)}`,
+            id: `event-war-continued-${updatedWar.id}-${currentMonth}`,
+            kind: "war_continued",
+            nationIds: [flipped.attackerNationId, flipped.defenderNationId],
+            title: "War Continued",
+          }));
+          relations = adjustNationRelation(relations, attacker.id, defender.id, -2, currentMonth);
+          nextWars.push(flipped);
+        } else {
+          events.push(buildWarEvent({
+            currentMonth,
+            description: `${attacker.name} and ${defender.name} agreed to an ${truceAfterWarMonths}-month truce after sustained fighting. ${warDeclineReport(world, nextMilitary, diplomacy, updatedWar, "decisive", currentMonth)}`,
+            id: `event-war-ended-${updatedWar.id}-${currentMonth}`,
+            kind: "war_ended",
+            nationIds: [attacker.id, defender.id],
+            title: "War Ended",
+          }));
+          relations = adjustNationRelation(relations, attacker.id, defender.id, -4, currentMonth);
+        }
         endedWar = true;
         break;
       }
@@ -568,9 +609,23 @@ export function advanceWarSystem(
 
     // End wars stuck for over 180 months without battle
     if ((currentMonth - (updatedWar.lastBattleMonth ?? updatedWar.startedAtMonth)) > 180) {
+      if (defenderContinuesWar(world, diplomacy, nextMilitary, relations, updatedWar)) {
+        const flipped = flipWarAttacker(updatedWar);
+        events.push(buildWarEvent({
+          currentMonth,
+          description: `${defender.name} refuses the truce and takes the offensive against ${attacker.name}. ${warDeclineReport(world, nextMilitary, diplomacy, updatedWar, "stuck", currentMonth)}`,
+          id: `event-war-continued-${updatedWar.id}-${currentMonth}`,
+          kind: "war_continued",
+          nationIds: [flipped.attackerNationId, flipped.defenderNationId],
+          title: "War Continued",
+        }));
+        relations = adjustNationRelation(relations, attacker.id, defender.id, -2, currentMonth);
+        nextWars.push(flipped);
+        continue;
+      }
       events.push(buildWarEvent({
         currentMonth,
-        description: `${attacker.name} and ${defender.name} ended their war after being stuck without contact for over 180 months.`,
+        description: `${attacker.name} and ${defender.name} ended their war after being stuck without contact for over 180 months. ${warDeclineReport(world, nextMilitary, diplomacy, updatedWar, "stuck", currentMonth)}`,
         id: `event-war-ended-stuck-${updatedWar.id}-${currentMonth}`,
         kind: "war_ended",
         nationIds: [attacker.id, defender.id],
@@ -657,15 +712,16 @@ function hasWarFront(world: World, attackerNationId: string, defenderNationId: s
     Boolean(pickTargetProvince(world, defenderNationId, attackerNationId));
 }
 
-function hasReachableWarObjective(world: World, military: MilitaryState, war: WarState) {
-  return canReachWarTarget(world, military[war.attackerNationId], war.defenderNationId) ||
-    canReachWarTarget(world, military[war.defenderNationId], war.attackerNationId);
+function hasReachableWarObjective(world: World, military: MilitaryState, war: WarState, diplomacy: DiplomacyState) {
+  return canReachWarTarget(world, military[war.attackerNationId], war.defenderNationId, diplomacy) ||
+    canReachWarTarget(world, military[war.defenderNationId], war.attackerNationId, diplomacy);
 }
 
 function canReachWarTarget(
   world: World,
   army: NationMilitary | undefined,
   enemyNationId: string,
+  diplomacy?: DiplomacyState,
 ) {
   if (!army) {
     return false;
@@ -684,7 +740,7 @@ function canReachWarTarget(
   ];
 
   return origins.some((originProvinceId) => {
-    const path = findProvincePath(world, army.nationId, originProvinceId, target.id);
+    const path = findProvincePath(world, army.nationId, originProvinceId, target.id, diplomacy);
     return path.length > 1 || originProvinceId === target.id;
   });
 }
@@ -745,6 +801,7 @@ function buildInitialUnits(armyScore: number): ArmyUnits {
       infantry: soldiers * 0.43,
       lightCavalry: soldiers * 0.12,
       militia: soldiers * 0.38,
+      levy: 0,
     },
     soldiers,
   );
@@ -756,9 +813,10 @@ function distributeRound(raw: ArmyUnits, total: number): ArmyUnits {
     infantry: Math.floor(raw.infantry),
     lightCavalry: Math.floor(raw.lightCavalry),
     militia: Math.floor(raw.militia),
+    levy: Math.floor(raw.levy),
   };
   let remainder = total - totalUnits(result);
-  const types: UnitType[] = ["heavyCavalry", "infantry", "lightCavalry", "militia"];
+  const types: UnitType[] = [...unitTypes];
   const indexed = types.map((t) => ({ type: t, frac: raw[t] - Math.floor(raw[t]) }))
     .sort((a, b) => b.frac - a.frac);
   for (let i = 0; i < remainder && i < indexed.length; i += 1) {
@@ -796,8 +854,8 @@ function queueRecruitmentForPolicy(
   }
 
   const weights: ArmyUnits = policy?.economy.policy === "army_building"
-    ? { heavyCavalry: 0.1, infantry: 0.48, lightCavalry: 0.16, militia: 0.26 }
-    : { heavyCavalry: 0.04, infantry: 0.4, lightCavalry: 0.1, militia: 0.46 };
+    ? { heavyCavalry: 0.1, infantry: 0.48, lightCavalry: 0.16, militia: 0.26, levy: 0 }
+    : { heavyCavalry: 0.04, infantry: 0.4, lightCavalry: 0.1, militia: 0.46, levy: 0 };
   const nextArmy: NationMilitary = cloneArmy(army);
   let remainingGold = stockpile.gold;
   let remainingNeed = Math.min(recruitNeed, Math.ceil(desiredTotal * 0.035));
@@ -884,8 +942,8 @@ function disbandExcessMilitary(
   }
 
   const typeOrder: UnitType[] = expensiveArmy
-    ? ["heavyCavalry", "lightCavalry", "infantry", "militia"]
-    : ["militia", "infantry", "lightCavalry", "heavyCavalry"];
+    ? ["levy", "heavyCavalry", "lightCavalry", "infantry", "militia"]
+    : ["levy", "militia", "infantry", "lightCavalry", "heavyCavalry"];
   const result = disbandUnits(army, disbandAmount, typeOrder);
   const removedTotal = totalUnits(result.removed);
 
@@ -960,7 +1018,7 @@ function completeRecruitment(
 }
 
 function chooseRecruitmentUnitType(weights: ArmyUnits, seed: string, cityId: string, currentMonth: number) {
-  const roll = seededRandom(seed, `recruit:${cityId}`, currentMonth);
+  const roll = at(seed, `recruit:${cityId}`, currentMonth);
   let threshold = 0;
 
   for (const type of unitTypes) {
@@ -979,6 +1037,7 @@ function recruitmentTimeMonths(unitType: UnitType, isCapital: boolean) {
     infantry: 3,
     lightCavalry: 4,
     militia: 2,
+    levy: 1,
   } satisfies Record<UnitType, number>;
 
   return Math.max(1, base[unitType] - (isCapital ? 1 : 0));
@@ -1147,6 +1206,7 @@ function issueArmyCommands(
   diplomacy: DiplomacyState,
   army: NationMilitary,
   currentMonth: number,
+  stockpiles?: NationStockpiles,
 ) {
   let nextArmy = cloneArmy(army);
   const events: GameEvent[] = [];
@@ -1193,6 +1253,8 @@ function issueArmyCommands(
         attackTarget.id,
         stance,
         currentMonth,
+        stockpiles ? { stockpiles, events } : undefined,
+        diplomacy,
       );
       nextArmy = created.army;
       if (created.event) {
@@ -1208,6 +1270,7 @@ function issueArmyCommands(
       attackTarget.id,
       stance,
       currentMonth,
+      diplomacy,
     );
     nextArmy = ordered.army;
     events.push(...ordered.events);
@@ -1233,6 +1296,8 @@ function createArmyGroupFromBestCity(
   objectiveProvinceId: string,
   stance: ArmyStance,
   currentMonth: number,
+  musterCtx?: { stockpiles: NationStockpiles; events: GameEvent[] },
+  diplomacy?: DiplomacyState,
 ) {
   const cityCandidates = world.cities
     .filter((city) => city.nationId === army.nationId)
@@ -1247,36 +1312,58 @@ function createArmyGroupFromBestCity(
       const scoreB = totalUnits(b.garrison) - b.distance * 18;
       return scoreB - scoreA;
     });
-  const selected = cityCandidates[0];
-  if (!selected) {
+  if (cityCandidates.length === 0) {
     return { army };
   }
 
-  const cityReserve = cityReserveTarget(selected.city);
-  const movable = Math.max(0, totalUnits(selected.garrison) - cityReserve);
-  const unitsToMove = takeUnits(selected.garrison, Math.max(35, Math.floor(movable * 0.62)));
-  if (totalUnits(unitsToMove) < 25) {
-    return { army };
-  }
-
+  // Recluta concentrada: sumar aporte de varias ciudades hasta el mínimo útil.
   const nextArmy = cloneArmy(army);
-  nextArmy.cityGarrisons[selected.city.id] = subtractUnits(
-    nextArmy.cityGarrisons[selected.city.id] ?? emptyUnits(),
-    unitsToMove,
-  );
-  const path = findProvincePath(world, army.nationId, selected.city.provinceId, destinationProvinceId);
+  const pooled = emptyUnits();
+  const musterCities: string[] = [];
+  for (const { city } of cityCandidates) {
+    const garrison = nextArmy.cityGarrisons[city.id] ?? emptyUnits();
+    const movable = Math.max(0, totalUnits(garrison) - cityReserveTarget(city));
+    if (movable <= 0) {
+      continue;
+    }
+    const take = takeUnits(garrison, Math.floor(movable * 0.62));
+    if (totalUnits(take) <= 0) {
+      continue;
+    }
+    addUnits(pooled, take);
+    nextArmy.cityGarrisons[city.id] = subtractUnits(garrison, take);
+    musterCities.push(city.name);
+    if (totalUnits(pooled) >= MIN_GROUP_SIZE) {
+      break;
+    }
+  }
+
+  // Leva automática: si el pool no alcanza, llamados de habitantes a milicia (levy).
+  if (totalUnits(pooled) < MIN_GROUP_SIZE && musterCtx) {
+    const stockpile = musterCtx.stockpiles[army.nationId];
+    if (stockpile) {
+      const levy = levyMilitia(world, army.nationId, stockpile, MIN_GROUP_SIZE - totalUnits(pooled), currentMonth, musterCtx.events);
+      addUnits(pooled, levy.units);
+    }
+  }
+  if (totalUnits(pooled) < MIN_GROUP_SIZE) {
+    return { army };
+  }
+
+  const homeCity = cityCandidates[0].city;
+  const path = findProvincePath(world, army.nationId, homeCity.provinceId, destinationProvinceId, diplomacy);
   const group: ArmyGroup = {
     createdAtMonth: currentMonth,
     destinationProvinceId,
-    id: `army-group-${army.nationId}-${selected.city.id}-${currentMonth}-${army.armyGroups.length}`,
-    locationProvinceId: selected.city.provinceId,
+    id: `army-group-${army.nationId}-${homeCity.id}-${currentMonth}-${army.armyGroups.length}`,
+    locationProvinceId: homeCity.provinceId,
     movementProgress: 0,
     nationId: army.nationId,
     objectiveProvinceId,
-    originCityId: selected.city.id,
+    originCityId: homeCity.id,
     pathProvinceIds: path.slice(1),
     stance,
-    units: unitsToMove,
+    units: pooled,
     updatedAtMonth: currentMonth,
   };
   nextArmy.armyGroups.push(group);
@@ -1285,13 +1372,113 @@ function createArmyGroupFromBestCity(
     army: recalculateNationUnits(nextArmy),
     event: buildWarEvent({
       currentMonth,
-      description: `${nationName(world, army.nationId)} formed an army group for ${formatArmyStance(stance)} from ${selected.city.name} and ordered it toward ${world.provinceById.get(destinationProvinceId)?.name ?? destinationProvinceId}.`,
+      description: `${nationName(world, army.nationId)} mustered an army group for ${formatArmyStance(stance)} from ${musterCities.slice(0, 3).join(", ")}${musterCities.length > 3 ? ` and ${musterCities.length - 3} more` : ""} and ordered it toward ${world.provinceById.get(destinationProvinceId)?.name ?? destinationProvinceId}.`,
       id: `event-army-group-created-${group.id}`,
       kind: "army_group_created",
       nationIds: [army.nationId],
       title: "Army Group Created",
     }),
   };
+}
+
+const MIN_GROUP_SIZE = 25;
+const LEVY_GOLD_PER_HEAD = 0.015;
+const LEVY_DESERT_RATE = 0.1;
+const LEVY_MAX_POP_SHARE = 0.05;
+
+/**
+ * Llamado a la milicia: convierte habitantes en levy (stats ~mitad de soldado).
+ * Cuesta 0.015 oro por cabeza; 10% deserta (determinista por seed).
+ * La población se descuenta siempre, incluso por desertores; los desertores
+ * se suman al tile no-nacional más cercano. Sin mutaciones si no alcanza `needed`.
+ */
+function levyMilitia(
+  world: World,
+  nationId: string,
+  stockpile: NationStockpiles[string],
+  needed: number,
+  currentMonth: number,
+  events: GameEvent[],
+): { units: ArmyUnits; called: number; deserted: number; cost: number } {
+  const units = emptyUnits();
+  const none = { units, called: 0, deserted: 0, cost: 0 };
+  if (needed <= 0) {
+    return none;
+  }
+  const cities = world.cities
+    .filter((city) => city.nationId === nationId && city.population > 0)
+    .sort((a, b) => b.population - a.population);
+  if (cities.length === 0) {
+    return none;
+  }
+
+  // La deserción es determinista (seed+mes): se planifica con margen para que
+  // los sobrevivientes cubran `needed`. Sin mutaciones si no se alcanza.
+  const desertRoll = at(world.seed, `levy-desert:${nationId}`, currentMonth);
+  const survivorsOf = (called: number) =>
+    called - Math.min(called, Math.floor(called * LEVY_DESERT_RATE + desertRoll));
+  let affordable = Math.floor((stockpile.gold ?? 0) / LEVY_GOLD_PER_HEAD);
+  const plan: Array<{ city: (typeof cities)[number]; take: number }> = [];
+  let called = 0;
+  for (const city of cities) {
+    if (survivorsOf(called) >= needed || affordable <= 0) {
+      break;
+    }
+    // Margen extra porque parte deserta.
+    const want = needed - survivorsOf(called) + 2;
+    const take = Math.min(want, Math.floor(city.population * LEVY_MAX_POP_SHARE), affordable);
+    if (take <= 0) {
+      continue;
+    }
+    plan.push({ city, take });
+    called += take;
+    affordable -= take;
+  }
+  if (survivorsOf(called) < needed) {
+    return none;
+  }
+
+  const cost = called * LEVY_GOLD_PER_HEAD;
+  stockpile.gold = Math.max(0, (stockpile.gold ?? 0) - cost);
+  for (const { city, take } of plan) {
+    city.population = Math.max(0, city.population - take);
+  }
+  const deserted = called - survivorsOf(called);
+  units.levy = called - deserted;
+  if (deserted > 0) {
+    settleDeserters(world, nationId, deserted);
+  }
+  events.push(buildWarEvent({
+    currentMonth,
+    description: `${nationName(world, nationId)} called ${called} inhabitants to militia duty for ${cost.toFixed(2)} gold; ${deserted} deserted.`,
+    id: `event-levy-called-${nationId}-${currentMonth}`,
+    kind: "levy_called",
+    nationIds: [nationId],
+    title: "Levy Called",
+  }));
+  return { units, called, deserted, cost };
+}
+
+function settleDeserters(world: World, nationId: string, count: number) {
+  const anchor = world.cities.find((city) => city.nationId === nationId);
+  const ax = anchor?.x ?? 0;
+  const ay = anchor?.y ?? 0;
+  let best: Tile | undefined;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const tile of world.tiles) {
+    const province = tile.provinceId ? world.provinceById.get(tile.provinceId) : undefined;
+    if (!province || province.nationId === nationId) {
+      continue;
+    }
+    const dist = (tile.x - ax) ** 2 + (tile.y - ay) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = tile;
+    }
+  }
+  if (best) {
+    best.populationOnTile = (best.populationOnTile ?? 0) + count;
+  }
 }
 
 function orderArmyGroupsTowardObjective(
@@ -1301,6 +1488,7 @@ function orderArmyGroupsTowardObjective(
   objectiveProvinceId: string,
   stance: ArmyStance,
   currentMonth: number,
+  diplomacy?: DiplomacyState,
 ) {
   const nextArmy = cloneArmy(army);
   const events: GameEvent[] = [];
@@ -1320,7 +1508,7 @@ function orderArmyGroupsTowardObjective(
     if (!canRetask && group.objectiveProvinceId && group.objectiveProvinceId !== objectiveProvinceId) {
       continue;
     }
-    const path = findProvincePath(world, army.nationId, group.locationProvinceId, destinationProvinceId);
+    const path = findProvincePath(world, army.nationId, group.locationProvinceId, destinationProvinceId, diplomacy);
     if (path.length <= 1) {
       continue;
     }
@@ -1484,6 +1672,7 @@ function findProvincePath(
   nationId: string,
   startProvinceId: string,
   destinationProvinceId: string,
+  diplomacy?: DiplomacyState,
 ) {
   if (startProvinceId === destinationProvinceId) {
     return [startProvinceId];
@@ -1510,11 +1699,9 @@ function findProvincePath(
         continue;
       }
       const isDestination = neighborId === destinationProvinceId;
-      if (province.nationId !== nationId && province.nationId !== undefined && !isDestination) {
-        continue;
-      }
-
-      const newCost = current.cost + provincePathCost(world, neighborId) + (province.nationId === nationId ? 0 : 1);
+      // Tránsito ponderado: propio < aliado < neutral < terceros (paso, no invasión).
+      const newCost = current.cost + provincePathCost(world, neighborId) +
+        transitPenalty(world, diplomacy, nationId, province.nationId, isDestination);
       if (!costSoFar.has(neighborId) || newCost < (costSoFar.get(neighborId) ?? Number.POSITIVE_INFINITY)) {
         costSoFar.set(neighborId, newCost);
         cameFrom.set(neighborId, current.provinceId);
@@ -1539,6 +1726,26 @@ function findProvincePath(
   }
 
   return path.reverse();
+}
+
+function transitPenalty(
+  world: World,
+  diplomacy: DiplomacyState | undefined,
+  nationId: string,
+  ownerNationId: string | undefined,
+  isDestination: boolean,
+): number {
+  if (ownerNationId === nationId || isDestination) {
+    return 0;
+  }
+  if (ownerNationId === undefined) {
+    return 4;
+  }
+  if (diplomacy?.alliances.some((alliance) =>
+    relationKey(alliance.nationAId, alliance.nationBId) === relationKey(nationId, ownerNationId))) {
+    return 2;
+  }
+  return 9;
 }
 
 function provinceDistance(world: World, startProvinceId: string, destinationProvinceId: string) {
@@ -1603,7 +1810,7 @@ function armyGroupSpeed(units: ArmyUnits) {
     return 0;
   }
 
-  const slowShare = (units.militia + units.infantry) / total;
+  const slowShare = (units.militia + units.infantry + units.levy) / total;
   const lightCavalryShare = units.lightCavalry / total;
   return clamp(0.65 + lightCavalryShare * 1.1 - slowShare * 0.18, 0.45, 1.6);
 }
@@ -1619,21 +1826,19 @@ function takeUnits(units: ArmyUnits, desiredAmount: number) {
   }
 
   const share = Math.min(1, desiredAmount / total);
-  return {
-    heavyCavalry: Math.floor(units.heavyCavalry * share),
-    infantry: Math.floor(units.infantry * share),
-    lightCavalry: Math.floor(units.lightCavalry * share),
-    militia: Math.floor(units.militia * share),
-  };
+  const taken = emptyUnits();
+  for (const type of unitTypes) {
+    taken[type] = Math.floor(units[type] * share);
+  }
+  return taken;
 }
 
 function subtractUnits(units: ArmyUnits, removed: ArmyUnits) {
-  return {
-    heavyCavalry: Math.max(0, units.heavyCavalry - removed.heavyCavalry),
-    infantry: Math.max(0, units.infantry - removed.infantry),
-    lightCavalry: Math.max(0, units.lightCavalry - removed.lightCavalry),
-    militia: Math.max(0, units.militia - removed.militia),
-  };
+  const rest = emptyUnits();
+  for (const type of unitTypes) {
+    rest[type] = Math.max(0, units[type] - removed[type]);
+  }
+  return rest;
 }
 
 function addUnits(target: ArmyUnits, source: ArmyUnits) {
@@ -1656,16 +1861,14 @@ function distributeUnitsToCities(units: ArmyUnits, cities: Array<{ id: string; i
 
   for (const city of cities) {
     const weight = (city.level + (city.isCapital ? 3 : 1)) / totalWeight;
-    const cityUnits: ArmyUnits = {
-      heavyCavalry: units.heavyCavalry * weight,
-      infantry: units.infantry * weight,
-      lightCavalry: units.lightCavalry * weight,
-      militia: units.militia * weight,
-    };
+    const cityUnits = emptyUnits();
+    for (const type of unitTypes) {
+      cityUnits[type] = units[type] * weight;
+    }
     garrisons[city.id] = cityUnits;
   }
 
-  const allTypes: UnitType[] = ["heavyCavalry", "infantry", "lightCavalry", "militia"];
+  const allTypes: UnitType[] = [...unitTypes];
   for (const type of allTypes) {
     const raw = cities.map((city) => ({ city, value: garrisons[city.id][type] }));
     const floors = raw.map((r) => Math.floor(r.value));
@@ -1793,8 +1996,8 @@ function resolveBattle({
   const intelBonus = hasActiveIntelligence(spyNetwork, attackerNationId, defenderNationId, currentMonth)
     ? 1.08
     : 1;
-  const attackRoll = 0.88 + seededRandom(world.seed, `${war.id}:attack:${targetProvince.id}`, currentMonth) * 0.24;
-  const defenseRoll = 0.9 + seededRandom(world.seed, `${war.id}:defense:${targetProvince.id}`, currentMonth) * 0.2;
+  const attackRoll = 0.88 + at(world.seed, `${war.id}:attack:${targetProvince.id}`, currentMonth) * 0.24;
+  const defenseRoll = 0.9 + at(world.seed, `${war.id}:defense:${targetProvince.id}`, currentMonth) * 0.2;
   const mobilityBonus = 1 + averageSpeed(attackerUnits) * 0.035;
   const attackerPower =
     calculateUnitsAttackPower(attackerUnits) *
@@ -2047,7 +2250,7 @@ function addAdjacency(adjacency: Map<string, Set<string>>, provinceId: string, n
   adjacency.set(provinceId, neighbors);
 }
 
-function rebuildNationEdges(world: World) {
+export function rebuildNationEdges(world: World) {
   const tileByCoord = new Map(world.tiles.map((tile) => [`${tile.x},${tile.y}`, tile]));
   const nationEdges = [];
 
@@ -2164,6 +2367,75 @@ function shouldEndWar(war: WarState, attackerArmy: NationMilitary, defenderArmy:
   return (war.battleCount ?? 0) >= 5 && Math.abs((war.attackerScore ?? 0) - (war.defenderScore ?? 0)) >= 3;
 }
 
+export type WarEndCause = "no-front" | "stuck" | "decisive";
+
+/** El defensor toma la ofensiva si no ha perdido, tiene músculo, quiere y alcanza. */
+function defenderContinuesWar(
+  world: World,
+  diplomacy: DiplomacyState,
+  military: MilitaryState,
+  relations: NationRelations,
+  war: WarState,
+): boolean {
+  const defenderArmy = military[war.defenderNationId];
+  const attackerArmy = military[war.attackerNationId];
+  if (!defenderArmy || !attackerArmy) {
+    return false;
+  }
+  if (!isNationActive(world, war.defenderNationId) || !isNationActive(world, war.attackerNationId)) {
+    return false;
+  }
+  const defTroops = totalUnits(defenderArmy.units);
+  if (defTroops < 45) {
+    return false;
+  }
+  const attitude = getNationRelation(relations, war.defenderNationId, war.attackerNationId)?.attitude ?? 0;
+  const attTroops = Math.max(1, totalUnits(attackerArmy.units));
+  const wantsToContinue = attitude <= -10 || (defTroops >= attTroops * 1.25 && attitude <= 8);
+  if (!wantsToContinue) {
+    return false;
+  }
+  return canReachWarTarget(world, defenderArmy, war.attackerNationId, diplomacy);
+}
+
+function flipWarAttacker(war: WarState): WarState {
+  return {
+    ...war,
+    attackerNationId: war.defenderNationId,
+    defenderNationId: war.attackerNationId,
+    attackerScore: 0,
+    defenderScore: 0,
+    targetProvinceId: undefined,
+  };
+}
+
+/** Parte de motivos del declive: batallas, score, contacto, tropas y frentes. */
+function warDeclineReport(
+  world: World,
+  military: MilitaryState,
+  diplomacy: DiplomacyState,
+  war: WarState,
+  cause: WarEndCause,
+  currentMonth: number,
+): string {
+  const attackerId = war.attackerNationId;
+  const defenderId = war.defenderNationId;
+  const attackerTroops = totalUnits(military[attackerId]?.units ?? emptyUnits());
+  const defenderTroops = totalUnits(military[defenderId]?.units ?? emptyUnits());
+  const battles = war.battleCount ?? 0;
+  const sinceText = battles > 0 && war.lastBattleMonth !== undefined
+    ? `last contact ${currentMonth - war.lastBattleMonth} months ago`
+    : "no contact since the war began";
+  const attackerReach = canReachWarTarget(world, military[attackerId], defenderId, diplomacy) ? "yes" : "no";
+  const defenderReach = canReachWarTarget(world, military[defenderId], attackerId, diplomacy) ? "yes" : "no";
+  const causeText = cause === "no-front"
+    ? "no viable front or reachable objective"
+    : cause === "stuck"
+      ? "over 180 months without contact"
+      : "decisive score after sustained fighting";
+  return `Decline (${causeText}): ${battles} battles (attacker ${war.attackerScore ?? 0} – defender ${war.defenderScore ?? 0}), ${sinceText}. Troops: ${nationName(world, attackerId)} ${attackerTroops} vs ${nationName(world, defenderId)} ${defenderTroops}. Reachable front: attacker ${attackerReach}, defender ${defenderReach}.`;
+}
+
 function dedupeWars(wars: WarState[]) {
   const seen = new Set<string>();
   return wars.filter((war) => {
@@ -2217,6 +2489,7 @@ function emptyUnits(): ArmyUnits {
     infantry: 0,
     lightCavalry: 0,
     militia: 0,
+    levy: 0,
   };
 }
 
@@ -2241,10 +2514,10 @@ function calculateMonthlyUpkeep(units: ArmyUnits, nationId: string, world: World
   if (totalUnits === 0) return 0;
 
   const provinceIds = world.provinces.filter(p => p.nationId === nationId).map(p => p.id);
-  const totalPopulation = provinceIds.reduce((sum, pid) => {
-    const province = world.provinceById.get(pid);
-    return sum + (province ? province.population : 0);
-  }, 0);
+  // Fuente única de población: las ciudades (Province no tiene campo population).
+  const totalPopulation = world.cities
+    .filter((city) => city.nationId === nationId)
+    .reduce((sum, city) => sum + city.population, 0);
 
   const baseUpkeep = unitTypes.reduce((sum, type) => sum + units[type] * unitStats[type].upkeepGold, 0);
   const densityMultiplier = Math.min(2, Math.max(0.5, totalPopulation / Math.max(1, provinceIds.length * 50)));
@@ -2320,11 +2593,13 @@ function averageSpeed(units: ArmyUnits) {
 
 function applyLosses(units: ArmyUnits, lossRate: number) {
   for (const type of unitTypes) {
-    const typeLossRate = type === "militia"
-      ? lossRate * 1.2
-      : type === "heavyCavalry"
-        ? lossRate * 0.72
-        : lossRate;
+    const typeLossRate = type === "levy"
+      ? lossRate * 1.3
+      : type === "militia"
+        ? lossRate * 1.2
+        : type === "heavyCavalry"
+          ? lossRate * 0.72
+          : lossRate;
     units[type] = Math.max(0, units[type] - Math.ceil(units[type] * typeLossRate));
   }
 }
@@ -2445,16 +2720,6 @@ function pickRetreatProvince(world: World, nationId: string, fromProvinceId: str
 
   return candidates
     .sort((a, b) => scoreTargetProvince(world, b) - scoreTargetProvince(world, a))[0]?.id;
-}
-
-function seededRandom(seed: string, salt: string, currentMonth: number) {
-  let hash = 2166136261;
-  const value = `${seed}:${salt}:${currentMonth}`;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 4294967295;
 }
 
 function buildWarEvent({ currentMonth, ...event }: Omit<GameEvent, "month"> & { currentMonth: number }): GameEvent {

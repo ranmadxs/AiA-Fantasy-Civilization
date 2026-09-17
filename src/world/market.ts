@@ -1,4 +1,6 @@
 import type { Resource } from "./types";
+import type { GameEvent } from "./events";
+import { stream, at } from "./rngService";
 
 export type MarketOffer = {
   id: string;
@@ -57,19 +59,21 @@ export function generateOffers(
   offers: MarketOffer[],
   nationIds: string[],
   currentTurn: number,
+  seed: string,
 ): MarketOffer[] {
+  const rng = stream(seed, "market");
   const newOffers: MarketOffer[] = [];
   const resources: Resource[] = ["grain", "timber", "iron", "coal", "oil", "water", "gold", "silver", "copper"];
 
   for (const nationId of nationIds) {
-    const numOffers = Math.floor(Math.random() * 3) + 1;
-    for (let i = 0; i < numOffers; i++) {
-      const resource = resources[Math.floor(Math.random() * resources.length)];
-      const isSelling = Math.random() > 0.5;
+    const numOffers = Math.floor(rng() * 3) + 1;
+    for (let i = 0; i < numOffers; i += 1) {
+      const resource = resources[Math.floor(rng() * resources.length)];
+      const isSelling = rng() > 0.5;
       const basePrice = 1;
-      const fluctuation = (Math.random() - 0.5) * 0.2;
+      const fluctuation = (rng() - 0.5) * 0.2;
       const price = Math.max(0.01, basePrice * (1 + fluctuation) * (isSelling ? 0.9 : 1.1));
-      const quantity = Math.floor(Math.random() * 500) + 50;
+      const quantity = Math.floor(rng() * 500) + 50;
 
       newOffers.push({
         id: `offer-${currentTurn}-${nationId}-${i}`,
@@ -100,7 +104,7 @@ export function calculateTransportCost(distance: number, units: number): number 
 export function executeTransactions(
   marketState: MarketState,
   currentTurn: number,
-): { marketState: MarketState; transactions: Transaction[] } {
+): { marketState: MarketState; transactions: Transaction[]; events: GameEvent[] } {
   const executedTransactions: Transaction[] = [];
   const activeOffers = marketState.offers.filter(
     (offer) => offer.status === "offered" && offer.validUntil > currentTurn,
@@ -124,9 +128,11 @@ export function executeTransactions(
     executedTransactions.push(transaction);
   }
 
+  let expiredCount = 0;
   for (const offer of marketState.offers) {
     if (offer.status === "offered" && offer.validUntil <= currentTurn) {
       offer.status = "expired";
+      expiredCount += 1;
     }
   }
 
@@ -137,17 +143,40 @@ export function executeTransactions(
     currentPhase: "MARKET_END",
   };
 
-  return { marketState: newMarketState, transactions: executedTransactions };
+  return { marketState: newMarketState, transactions: executedTransactions, events: buildMarketEvents(newMarketState, executedTransactions, expiredCount, currentTurn) };
+}
+
+export function buildMarketEvents(
+  marketState: MarketState,
+  executed: Transaction[],
+  expiredCount: number,
+  currentTurn: number,
+): GameEvent[] {
+  const offeredCount = marketState.offers.filter((o) => o.validFrom === currentTurn).length;
+  // Resumen agregado: máximo 1 evento/mes para no inundar el log (slice -240).
+  if (offeredCount === 0 && executed.length === 0 && expiredCount === 0) return [];
+  const totalGold = Math.round(executed.reduce((s, t) => s + t.totalGold, 0));
+  return [{
+    id: `event-market-${currentTurn}`,
+    month: currentTurn,
+    kind: "market",
+    title: "Market Summary",
+    description: `Market: ${offeredCount} offers, ${executed.length} executed (${totalGold} gold), ${expiredCount} expired.`,
+    nationIds: [],
+  }];
 }
 
 export function systemSellResource(
   resourceType: string,
   quantity: number,
   basePrice: number,
+  seed: string,
+  currentTurn: number,
 ): MarketOffer {
-  const price = basePrice * SYSTEM_MARKUP * (1 + (Math.random() - 0.5) * SYSTEM_FLUCTUATION * 2);
+  const rng = stream(seed, "market");
+  const price = basePrice * SYSTEM_MARKUP * (1 + (rng() - 0.5) * SYSTEM_FLUCTUATION * 2);
   return {
-    id: `system-sell-${resourceType}-${Date.now()}`,
+    id: `system-sell-${resourceType}-${at(seed, "system-sell", currentTurn)}`,
     sellerNationId: "system",
     buyerNationId: "any",
     resourceType,

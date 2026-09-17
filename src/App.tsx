@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import pkg from "../package.json";
 import { type MapMode, WorldMap } from "./components/WorldMap";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { debug } from "./world/debugLog";
-import { MainMenu, type NewGameSettings } from "./components/MainMenu";
+import { MainMenu, DEFAULT_FREE_PROVINCE_RATIO, type NewGameSettings } from "./components/MainMenu";
 import { NationModelConfiguration } from "./components/NationModelConfiguration";
 import { buildDemoWorld } from "./world/buildDemoWorld";
 import { calculateCityEconomy, calculateNationCityEconomy } from "./world/cityEconomy";
@@ -16,10 +17,23 @@ import {
 } from "./world/diplomacy";
 import { addYield, formatResourceName, getTileMonthlyYield, type ResourceTotals } from "./world/economy";
 import {
-  filterEventsForNation,
   sortEventsNewestFirst,
+  filterEventsForNation,
   type GameEvent,
 } from "./world/events";
+import {
+  getEventCacheKey,
+  isCombatEventKind,
+  isDiplomacyEventKind,
+  isExpansionEventKind,
+  isLogisticsEventKind,
+  isSpyEventKind,
+  type GuerraSubTab,
+  type MercadoSubTab,
+  type ResumenSubTab,
+  type TopEventTab,
+} from "./world/eventCategories";
+import type { MarketOffer, MarketState, Transaction } from "./world/market";
 import {
   advanceNationPolicies,
   type NationPolicyState,
@@ -65,7 +79,7 @@ import { localizeText, type Language } from "./world/localization";
 
 debug.installGlobalHandlers();
 debug.time("app:buildDemoWorld inicial");
-let world = buildDemoWorld();
+let world = buildDemoWorld("observer-world-001", { freeProvinceRatio: DEFAULT_FREE_PROVINCE_RATIO });
 debug.timeEnd("app:buildDemoWorld inicial");
 const mapModes: { id: MapMode; label: string }[] = [
   { id: "political", label: "Political" },
@@ -94,10 +108,14 @@ export default function App() {
   const [mapMode, setMapMode] = useState<MapMode>("political");
   const [isRunning, setIsRunning] = useState(false);
   const [speed, setSpeed] = useState<SimulationSpeed>(1);
-  const [eventLogMode, setEventLogMode] = useState<"nation" | "overview">("overview");
+  const [eventLogMode, setEventLogMode] = useState<TopEventTab>("resumen");
+  const [resumenSub, setResumenSub] = useState<ResumenSubTab>("todo");
+  const [guerraSub, setGuerraSub] = useState<GuerraSubTab>("todos");
+  const [mercadoSub, setMercadoSub] = useState<MercadoSubTab>("ofertas");
   const [eventNationId, setEventNationId] = useState<string | undefined>();
   const [isEventPanelOpen, setIsEventPanelOpen] = useState(true);
   const [isPanelOpen, setIsPanelOpen] = useState(true);
+  const [dismissVictory, setDismissVictory] = useState(false);
   const [simulation, setSimulation] = useState<SimulationState>(() => createInitialSimulationState(world));
   const simulationRef = useRef(simulation);
   const turnInProgressRef = useRef(false);
@@ -118,12 +136,71 @@ export default function App() {
     () => formatWorldTime(simulation.elapsedMonths),
     [simulation.elapsedMonths],
   );
-  const overviewEvents = useMemo(() => sortEventsNewestFirst(simulation.events).slice(0, 80), [simulation.events]);
-  const nationEvents = useMemo(
-    () => eventNationId
-      ? filterEventsForNation(simulation.events, eventNationId, Math.max(0, simulation.elapsedMonths - 24)).slice(0, 20)
-      : [],
-    [eventNationId, simulation.elapsedMonths, simulation.events],
+  const eventCachesRef = useRef<Record<string, GameEvent[]>>({
+    "resumen-todo": [],
+    "resumen-diplomacia": [],
+    "resumen-expansiones": [],
+    "resumen-espionaje": [],
+    "guerra-combate": [],
+    "guerra-logistica": [],
+    "nacion": [],
+  });
+  const lastEventCountRef = useRef(0);
+
+  const currentCacheKey = (() => {
+    switch (eventLogMode) {
+      case "resumen":
+        return `resumen-${resumenSub}`;
+      case "guerra":
+        return `guerra-${guerraSub}`;
+      case "nacion":
+        return "nacion";
+      default:
+        return null;
+    }
+  })();
+
+  if (simulation.events.length > lastEventCountRef.current) {
+    const newEvents = simulation.events.slice(lastEventCountRef.current);
+    for (const event of newEvents) {
+      const key = getEventCacheKey(event.kind) ?? "resumen-todo";
+      if (eventCachesRef.current[key]) {
+        eventCachesRef.current[key] = [
+          event,
+          ...eventCachesRef.current[key],
+        ];
+      }
+    }
+    const allKeys = Object.keys(eventCachesRef.current);
+    for (const key of allKeys) {
+      eventCachesRef.current[key] = sortEventsNewestFirst(eventCachesRef.current[key]).slice(0, 800);
+    }
+    lastEventCountRef.current = simulation.events.length;
+  }
+
+  const activeEvents = (() => {
+    if (currentCacheKey === "nacion") {
+      return eventNationId
+        ? filterEventsForNation(simulation.events, eventNationId, Math.max(0, simulation.elapsedMonths - 24))
+        : [];
+    }
+    if (currentCacheKey === "guerra-todos") {
+      const combat = eventCachesRef.current["guerra-combate"] ?? [];
+      const logistics = eventCachesRef.current["guerra-logistica"] ?? [];
+      return sortEventsNewestFirst([...combat, ...logistics]).slice(0, 800);
+    }
+    return currentCacheKey
+      ? (eventCachesRef.current[currentCacheKey] ?? [])
+      : simulation.events;
+  })();
+
+  const marketOffers = useMemo<MarketOffer[]>(
+    () => [...(simulation.marketState?.offers ?? [])].sort((a, b) => b.validFrom - a.validFrom).slice(0, 60),
+    [simulation.marketState],
+  );
+  const marketTransactions = useMemo<Transaction[]>(
+    () => [...(simulation.marketState?.transactions ?? [])].sort((a, b) => b.executedAt - a.executedAt).slice(0, 60),
+    [simulation.marketState],
   );
   const selectedEventNation = useMemo(
     () => eventNationId ? world.nationById.get(eventNationId) : undefined,
@@ -166,6 +243,9 @@ export default function App() {
       const next = await advanceSimulationTurn(world, simulationRef.current, undefined, setTurnProgress);
       simulationRef.current = next;
       setSimulation(next);
+      if (next.gameOver) {
+        setIsRunning(false);
+      }
       setTurnProgress({
         turnNumber: next.elapsedMonths + 1,
         completedNationIds: [],
@@ -242,6 +322,7 @@ export default function App() {
     const nextWorld = buildDemoWorld(settings.seed, {
       cityCount: settings.cityCount,
       nationCount: settings.nationCount,
+      freeProvinceRatio: settings.freeProvinceRatio,
     });
     debug.timeEnd("app:buildDemoWorld nuevo juego");
     const nextSimulation = createInitialSimulationState(nextWorld);
@@ -256,7 +337,11 @@ export default function App() {
     });
     setIsRunning(false);
     setEventNationId(undefined);
-    setEventLogMode("overview");
+    setEventLogMode("resumen");
+    setResumenSub("todo");
+    setGuerraSub("todos");
+    setMercadoSub("ofertas");
+    setDismissVictory(false);
     setSelectedCityId(undefined);
     setCityReturnNationId(undefined);
     setSelectedNationId(undefined);
@@ -302,13 +387,20 @@ export default function App() {
         {isEventPanelOpen && (
           <EventLogPanel
             eventLogMode={eventLogMode}
+            resumenSub={resumenSub}
+            guerraSub={guerraSub}
+            mercadoSub={mercadoSub}
+            onSelectResumenSub={setResumenSub}
+            onSelectGuerraSub={setGuerraSub}
+            onSelectMercadoSub={setMercadoSub}
             eventNationId={eventNationId}
             nations={world.nations}
-            nationEvents={nationEvents}
+            activeEvents={activeEvents}
             onBackToNationList={() => setEventNationId(undefined)}
             onSelectMode={setEventLogMode}
             onSelectNation={setEventNationId}
-            overviewEvents={overviewEvents}
+            marketOffers={marketOffers}
+            marketTransactions={marketTransactions}
             selectedEventNation={selectedEventNation}
           />
         )}
@@ -344,6 +436,23 @@ export default function App() {
             <span className="scWorldTime">{worldTime}</span>
           </div>
         </div>
+        {simulation.gameOver && !dismissVictory && (
+          <div className="victoryOverlay" role="dialog" aria-modal="true" aria-label="Victory">
+            <div className="victoryCard">
+              <p className="eyebrow">Game Over</p>
+              <h1>🏆 {world.nationById.get(simulation.gameOver.victorNationId)?.name ?? simulation.gameOver.victorNationId}</h1>
+              <p>Domina el {Math.round(simulation.gameOver.share * 100)}% de la tierra — Victoria en {formatWorldTime(simulation.gameOver.month)}</p>
+              <div className="victoryActions">
+                <button className="menuPrimaryButton" onClick={() => setDismissVictory(true)} type="button">
+                  Seguir observando
+                </button>
+                <button className="menuTextButton" onClick={() => { setIsRunning(false); setActiveSurface("menu"); }} type="button">
+                  Nuevo juego
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
       <aside className="sidePanel" aria-label="World controls">
         <button
@@ -371,41 +480,52 @@ export default function App() {
             ) : (
               <>
                 <header>
-                  <p className="eyebrow">AI Civilization Sandbox</p>
-                  <h1>World Observer</h1>
-<label className="languageControl">
+                  <p className="eyebrow">AI Sandbox de Civilización v{pkg.version}</p>
+                  <h1>AI Sandbox de Civilización v{pkg.version}</h1>
+                  <label className="languageControl">
                     <span>{language === "zh" ? "游戏语言" : language === "es" ? "Idioma del Juego" : "Game Language"}</span>
                     <select value={language} onChange={(event) => setLanguage(event.target.value as Language)}>
                         <option value="es">Español</option>
                         <option value="zh">中文</option>
                         <option value="en">English</option>
                     </select>
-</label>
-                  <button
-                    className="aiConfigEntry"
-                    onClick={() => {
-                      setIsRunning(false);
-                      setActiveSurface("configuration");
-                    }}
-                    type="button"
-                  >
-                    <span>AI Configuration</span>
-                    <small>Models &amp; personalities</small>
-                  </button>
+                  </label>
                 </header>
+                <section className="mapModePanel">
+                  <h2>Map Mode</h2>
+                  <div className="segmentedControl" role="group" aria-label="Map mode">
+                    {mapModes.map((mode) => (
+                      <button
+                        className={mapMode === mode.id ? "active" : ""}
+                        key={mode.id}
+                        onClick={() => setMapMode(mode.id)}
+                        type="button"
+                      >
+                        {mode.label}
+                      </button>
+                    ))}
+                  </div>
+                </section>
                 <section className="timePanel">
                   <div className="timeReadout">
                     <span>World Time</span>
                     <strong>{worldTime}</strong>
                   </div>
+                  {simulation.gameOver && (
+                    <div className="victoryBanner" role="status">
+                      <strong>🏆 {world.nationById.get(simulation.gameOver.victorNationId)?.name ?? simulation.gameOver.victorNationId}</strong>
+                      <span>domina el {Math.round(simulation.gameOver.share * 100)}% — Victoria en {formatWorldTime(simulation.gameOver.month)}</span>
+                    </div>
+                  )}
                   <button
                     className="primaryControl"
+                    disabled={Boolean(simulation.gameOver)}
                     onClick={() => setIsRunning((running) => !running)}
                     type="button"
                   >
                     {isRunning ? "Pause" : "Play"}
                   </button>
-                  <button className="secondaryControl" disabled={turnProgress.phase !== "idle"} onClick={() => void runNextTurn()} type="button">
+                  <button className="secondaryControl" disabled={turnProgress.phase !== "idle" || Boolean(simulation.gameOver)} onClick={() => void runNextTurn()} type="button">
                     Next Turn
                   </button>
                   <div className="segmentedControl speedControl" role="group" aria-label="Simulation speed">
@@ -431,6 +551,17 @@ export default function App() {
                     </strong>
                   </div>
                 </section>
+                <button
+                  className="aiConfigEntry"
+                  onClick={() => {
+                    setIsRunning(false);
+                    setActiveSurface("configuration");
+                  }}
+                  type="button"
+                >
+                  <span>AI Configuration</span>
+                  <small>Models &amp; personalities</small>
+                </button>
                 <div className="statGrid">
                   <div>
                     <span>Seed</span>
@@ -455,21 +586,6 @@ export default function App() {
                     <strong>{world.cities.length}</strong>
                   </div>
                 </div>
-                <section className="mapModePanel">
-                  <h2>Map Mode</h2>
-                  <div className="segmentedControl" role="group" aria-label="Map mode">
-                    {mapModes.map((mode) => (
-                      <button
-                        className={mapMode === mode.id ? "active" : ""}
-                        key={mode.id}
-                        onClick={() => setMapMode(mode.id)}
-                        type="button"
-                      >
-                        {mode.label}
-                      </button>
-                    ))}
-                  </div>
-                </section>
                 <section className="legend">
                   <h2>Layers</h2>
                   <p><span className="line dashed" /> Province border</p>
@@ -477,6 +593,7 @@ export default function App() {
                   <p><span className="line nationLine" /> Nation color edge</p>
                   <p><span className="resourceMark" /> Resource node</p>
                   <p><span className="cityMark" /> City</p>
+                  <p><span className="freeMark" /> Tierra libre</p>
                 </section>
                 {selectedProvinceStats && (
                   <section className="provinceDetails">
@@ -560,32 +677,42 @@ type CityStats = NonNullable<ReturnType<typeof buildCityStats>>;
 
 function EventLogPanel({
   eventLogMode,
+  resumenSub,
+  guerraSub,
+  mercadoSub,
+  onSelectResumenSub,
+  onSelectGuerraSub,
+  onSelectMercadoSub,
   eventNationId,
   nations,
-  nationEvents,
+  activeEvents,
   onBackToNationList,
   onSelectMode,
   onSelectNation,
-  overviewEvents,
+  marketOffers,
+  marketTransactions,
   selectedEventNation,
 }: {
-  eventLogMode: "nation" | "overview";
+  eventLogMode: TopEventTab;
+  resumenSub: ResumenSubTab;
+  guerraSub: GuerraSubTab;
+  mercadoSub: MercadoSubTab;
+  onSelectResumenSub: (sub: ResumenSubTab) => void;
+  onSelectGuerraSub: (sub: GuerraSubTab) => void;
+  onSelectMercadoSub: (sub: MercadoSubTab) => void;
   eventNationId: string | undefined;
   nations: Nation[];
-  nationEvents: GameEvent[];
+  activeEvents: GameEvent[];
   onBackToNationList: () => void;
-  onSelectMode: (mode: "nation" | "overview") => void;
+  onSelectMode: (mode: TopEventTab) => void;
   onSelectNation: (nationId: string) => void;
-  overviewEvents: GameEvent[];
+  marketOffers: MarketOffer[];
+  marketTransactions: Transaction[];
   selectedEventNation: Nation | undefined;
 }) {
-  const handleSelectOverview = () => {
+  const handleSelectTab = (tab: TopEventTab) => {
     onBackToNationList();
-    onSelectMode("overview");
-  };
-  const handleSelectNationMode = () => {
-    onBackToNationList();
-    onSelectMode("nation");
+    onSelectMode(tab);
   };
 
   return (
@@ -594,23 +721,112 @@ function EventLogPanel({
         <p className="eyebrow">World History</p>
         <h1>Event Log</h1>
       </header>
-      <div className="segmentedControl eventModeControl" role="group" aria-label="Event log mode">
+      <div className="segmentedControl eventModeControl eventTopTabs" role="group" aria-label="Event log mode">
         <button
-          className={eventLogMode === "overview" ? "active" : ""}
-          onClick={handleSelectOverview}
+          className={eventLogMode === "resumen" ? "active" : ""}
+          onClick={() => handleSelectTab("resumen")}
           type="button"
         >
-          Overview
+          Resumen
         </button>
         <button
-          className={eventLogMode === "nation" ? "active" : ""}
-          onClick={handleSelectNationMode}
+          className={eventLogMode === "nacion" ? "active" : ""}
+          onClick={() => handleSelectTab("nacion")}
           type="button"
         >
-          Nation
+          Nación
+        </button>
+        <button
+          className={eventLogMode === "guerra" ? "active" : ""}
+          onClick={() => handleSelectTab("guerra")}
+          type="button"
+        >
+          Guerra
+        </button>
+        <button
+          className={eventLogMode === "mercado" ? "active" : ""}
+          onClick={() => handleSelectTab("mercado")}
+          type="button"
+        >
+          Mercado
         </button>
       </div>
-      {eventLogMode === "nation" && !selectedEventNation && (
+      {eventLogMode === "resumen" && (
+        <div className="segmentedControl eventSubTabs" role="group" aria-label="Resumen filter">
+          <button
+            className={resumenSub === "todo" ? "active" : ""}
+            onClick={() => onSelectResumenSub("todo")}
+            type="button"
+          >
+            Todo
+          </button>
+          <button
+            className={resumenSub === "diplomacia" ? "active" : ""}
+            onClick={() => onSelectResumenSub("diplomacia")}
+            type="button"
+          >
+            Diplomacia
+          </button>
+          <button
+            className={resumenSub === "expansiones" ? "active" : ""}
+            onClick={() => onSelectResumenSub("expansiones")}
+            type="button"
+          >
+            Expansiones
+          </button>
+          <button
+            className={resumenSub === "espionaje" ? "active" : ""}
+            onClick={() => onSelectResumenSub("espionaje")}
+            type="button"
+          >
+            Espionaje
+          </button>
+        </div>
+      )}
+      {eventLogMode === "guerra" && (
+        <div className="segmentedControl eventSubTabs" role="group" aria-label="Guerra filter">
+          <button
+            className={guerraSub === "todos" ? "active" : ""}
+            onClick={() => onSelectGuerraSub("todos")}
+            type="button"
+          >
+            Todos
+          </button>
+          <button
+            className={guerraSub === "combate" ? "active" : ""}
+            onClick={() => onSelectGuerraSub("combate")}
+            type="button"
+          >
+            Combate
+          </button>
+          <button
+            className={guerraSub === "logistica" ? "active" : ""}
+            onClick={() => onSelectGuerraSub("logistica")}
+            type="button"
+          >
+            Logística
+          </button>
+        </div>
+      )}
+      {eventLogMode === "mercado" && (
+        <div className="segmentedControl eventSubTabs" role="group" aria-label="Mercado view">
+          <button
+            className={mercadoSub === "ofertas" ? "active" : ""}
+            onClick={() => onSelectMercadoSub("ofertas")}
+            type="button"
+          >
+            Ofertas
+          </button>
+          <button
+            className={mercadoSub === "transacciones" ? "active" : ""}
+            onClick={() => onSelectMercadoSub("transacciones")}
+            type="button"
+          >
+            Transacciones
+          </button>
+        </div>
+      )}
+      {eventLogMode === "nacion" && !selectedEventNation && (
         <section className="eventNationSelector">
           <h2>Nation</h2>
           <div className="eventNationButtons">
@@ -628,16 +844,43 @@ function EventLogPanel({
           </div>
         </section>
       )}
-      {eventLogMode === "overview" && (
+       {eventLogMode === "resumen" && (
         <section className="eventListSection">
           <div className="sectionTitleRow">
-            <h2>Recent Major Events</h2>
-            <span>{overviewEvents.length}</span>
+            <h2>{resumenSub === "todo" ? "Recent Major Events" : resumenSub === "diplomacia" ? "Diplomacia" : resumenSub === "expansiones" ? "Expansiones" : "Espionaje"}</h2>
+            <span>{activeEvents.length}</span>
           </div>
-          <EventRows events={overviewEvents} />
+          <EventRows events={activeEvents} />
         </section>
       )}
-      {eventLogMode === "nation" && selectedEventNation && (
+      {eventLogMode === "guerra" && (
+        <section className="eventListSection">
+          <div className="sectionTitleRow">
+            <h2>{guerraSub === "todos" ? "Guerra: Todos" : guerraSub === "combate" ? "Guerra: Combate" : "Guerra: Logística"}</h2>
+            <span>{activeEvents.length}</span>
+          </div>
+          <EventRows events={activeEvents} />
+        </section>
+      )}
+      {eventLogMode === "mercado" && mercadoSub === "ofertas" && (
+        <section className="eventListSection">
+          <div className="sectionTitleRow">
+            <h2>Ofertas</h2>
+            <span>{marketOffers.length}</span>
+          </div>
+          <MarketOffersTable offers={marketOffers} nations={nations} />
+        </section>
+      )}
+      {eventLogMode === "mercado" && mercadoSub === "transacciones" && (
+        <section className="eventListSection">
+          <div className="sectionTitleRow">
+            <h2>Transacciones</h2>
+            <span>{marketTransactions.length}</span>
+          </div>
+          <MarketTransactionsTable transactions={marketTransactions} />
+        </section>
+      )}
+      {eventLogMode === "nacion" && selectedEventNation && (
         <section className="eventNationDetail">
           <button className="backButton compactBackButton" onClick={onBackToNationList} type="button">
             <span aria-hidden="true">{"<"}</span>
@@ -653,9 +896,9 @@ function EventLogPanel({
           <section className="eventListSection">
             <div className="sectionTitleRow">
               <h2>Last 2 Years</h2>
-              <span>{nationEvents.length}/20</span>
+              <span>{activeEvents.length}</span>
             </div>
-            <EventRows events={nationEvents} />
+            <EventRows events={activeEvents} />
           </section>
         </section>
       )}
@@ -671,13 +914,59 @@ function EventRows({ events }: { events: GameEvent[] }) {
   return (
     <div className="eventRows">
       {events.map((event) => (
-        <article className={`eventRow ${event.kind}`} key={event.id}>
+        <article className={`eventRow ${event.kind}${isSpyEventKind(event.kind) ? " spyEvent" : ""}${isLogisticsEventKind(event.kind) ? " logisticsEvent" : ""}${isCombatEventKind(event.kind) ? " combatEvent" : ""}${isDiplomacyEventKind(event.kind) ? " diplomaciaEvent" : ""}${isExpansionEventKind(event.kind) ? " expansionesEvent" : ""}`} key={event.id}>
           <div>
             <strong>{event.title}</strong>
             <span>{formatWorldTime(event.month)}</span>
           </div>
+          {isSpyEventKind(event.kind) && <em className="spyBadge">🕵️ Espionaje</em>}
+          {isLogisticsEventKind(event.kind) && <em className="logisticsBadge">📦 Logística</em>}
+          {isCombatEventKind(event.kind) && <em className="combatBadge">⚔️ Combate</em>}
+          {isDiplomacyEventKind(event.kind) && <em className="diplomaciaBadge">📜 Diplomacia</em>}
+          {isExpansionEventKind(event.kind) && <em className="expansionesBadge">🌍 Expansiones</em>}
           <p>{event.description}</p>
         </article>
+      ))}
+    </div>
+  );
+}
+
+function MarketOffersTable({ offers, nations }: { offers: MarketOffer[]; nations: Nation[] }) {
+  if (offers.length === 0) {
+    return <p className="emptyState">Sin ofertas vigentes</p>;
+  }
+  const nameOf = (id: string) => nations.find((n) => n.id === id)?.name ?? id;
+  return (
+    <div className="eventRows">
+      {offers.map((offer) => (
+<article className="eventRow market" key={offer.id}>
+            <div>
+              <strong>{offer.resourceType} × {offer.quantity}</strong>
+              <span>{offer.unitPrice} oro/u · {offer.status}</span>
+            </div>
+            <em className="marketOfferBadge">📊 Oferta</em>
+            <p>{nameOf(offer.sellerNationId)} → {offer.buyerNationId === "any" ? "cualquiera" : nameOf(offer.buyerNationId)} · válido {offer.validFrom}–{offer.validUntil}</p>
+          </article>
+      ))}
+    </div>
+  );
+}
+
+function MarketTransactionsTable({ transactions }: { transactions: Transaction[] }) {
+  if (transactions.length === 0) {
+    return <p className="emptyState">Sin transacciones ejecutadas</p>;
+  }
+  return (
+    <div className="eventRows">
+      {transactions.map((tx) => (
+<article className="eventRow market" key={tx.id}>
+            <div>
+              <strong>{Math.round(tx.totalGold)} oro</strong>
+              <span>turno {tx.executedAt} · {tx.status}</span>
+            </div>
+            <em className="marketTransactionBadge">💰 Transacción</em>
+            <p>{tx.offers.join(", ")} · transporte {Math.round(tx.transportCost)}</p>
+          </article>
       ))}
     </div>
   );

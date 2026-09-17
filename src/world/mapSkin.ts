@@ -8,17 +8,17 @@
  * resourceAt + generateRivers ya listos) y justo antes de `chooseProvinceSeeds`.
  *
  * Disciplina de semilla: NO consume el `rng` principal (mulberry32 del seed).
- * Deriva su propio RNG `seedHash ^ 0x70CC1E` para el overlay, así el mundo
+ * Deriva su propio RNG via `stream(seed, "skin")` para el overlay, así el mundo
  * lógico es bit-idéntico al que se generaba antes de este módulo.
  */
 import type { RiverTrail, Tile } from "./types";
 import { debug } from "./debugLog";
 // @ts-ignore — plugin JS puro (allowJs:false); verificado en runtime vía svg_generate.mjs
-import { parseBiomeMap, buildTolkienSVG, createRNG } from "../../plugins/map-yard/index.js";
+import { parseBiomeMap, buildTolkienSVG } from "../../plugins/map-yard/index.js";
+import { stream } from "./rngService";
 
-export const SKIN_TILE_SIZE = 10;
+const SKIN_TILE_SIZE = 10;
 export const SKIN_PADDING = 2;
-const SKIN_RNG_XOR = 0x70cc1e;
 
 /** Misma paleta que scripts/svg_generate.mjs (la que entiende PALETTE_AIA). */
 export const SKIN_TERRAIN_COLORS: Record<string, string> = {
@@ -72,21 +72,20 @@ function buildCleanSvgString(tiles: Tile[], width: number, height: number): { sv
  */
 export function applyBaseMapSkin(
   tiles: Tile[],
-  seedHash: number,
+  seed: string,
   dims: { width: number; height: number },
   trails: RiverTrail[] = [],
 ): MapSkin {
   const { svg: baseSvg, mapPixelW, mapPixelH } = buildCleanSvgString(tiles, dims.width, dims.height);
   const baseHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${baseSvg}</body></html>`;
 
-  // El log heredado "Paleta detectada" solo sale con ?debug=1 (en consola normal: silencio).
   debug.time("mapSkin:parseBiomeMap");
   const parsed = parseBiomeMap(baseHtml, { quiet: !debug.enabled() });
   debug.timeEnd("mapSkin:parseBiomeMap");
-  const rng = createRNG((seedHash ^ SKIN_RNG_XOR) >>> 0);
+  const rng = stream(seed, "skin");
   const terrainByCoord = new Map(tiles.map((t) => [`${t.x},${t.y}`, t.terrain]));
   debug.time("mapSkin:buildTolkienSVG");
-  const tolkienHtml: string = buildTolkienSVG(baseHtml, parsed.biomeMap, parsed.tileSize, rng, String(seedHash), {
+  const tolkienHtml: string = buildTolkienSVG(baseHtml, parsed.biomeMap, parsed.tileSize, rng, seed, {
     width: mapPixelW,
     height: mapPixelH,
     padding: SKIN_PADDING,

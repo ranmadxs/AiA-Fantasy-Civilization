@@ -97,6 +97,16 @@ jobs:
         run: |
           pnpm build
 
+      - name: Check for forbidden RNG patterns
+        run: |
+          MATCHES=$(grep -rn "Math\.random\|Date\.now()" src/world --include="*.ts" 2>/dev/null || true)
+          if [ -n "$MATCHES" ]; then
+            echo "❌ Se encontraron Math.random() o Date.now() en src/world:"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "✅ No se encontraron patrones RNG prohibidos en src/world"
+
       - name: Build Fantasy Map Generator library
         run: |
           cd Fantasy-Map-Generator && pnpm run build:lib

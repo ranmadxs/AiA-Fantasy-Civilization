@@ -1,3 +1,7 @@
+import { at } from "./rngService";
+
+let chatCounter = 0;
+
 export type ChatMessage = {
   id: string;
   sender: string;
@@ -20,11 +24,14 @@ export function addChatMessage(
   sender: string,
   channel: ChatMessage["channel"],
   content: string,
+  seed: string,
+  currentMonth: number,
 ): ChatMessage {
+  chatCounter += 1;
   const message: ChatMessage = {
-    id: `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id: `msg-${at(seed, `chat:${channel}:${sender}`, currentMonth)}-${chatCounter}`,
     sender,
-    timestamp: 0,
+    timestamp: currentMonth,
     channel,
     content,
   };
@@ -37,6 +44,8 @@ export function broadcastMessage(
   sender: string,
   channel: ChatMessage["channel"],
   content: string,
+  seed: string,
+  currentMonth: number,
 ): void {
-  addChatMessage(chatState, sender, channel, content);
+  addChatMessage(chatState, sender, channel, content, seed, currentMonth);
 }

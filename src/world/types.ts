@@ -39,6 +39,8 @@ export type Tile = {
   riverWidth?: number;
   provinceId?: string;
   resource?: Resource;
+  /** Habitantes sueltos en el tile (desertores, colonos). Opcional. */
+  populationOnTile?: number;
 };
 
 export type City = {

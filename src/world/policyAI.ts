@@ -1,12 +1,16 @@
 import { calculateNationCityEconomy } from "./cityEconomy";
 import { resourceTypes } from "./economy";
 import { isNationActive } from "./nationStatus";
+import { HEGEMONY_ALERT_SHARE, VICTORY_RUSH_SHARE, getDomination } from "./nationStatus";
 import { getNationRelationsFor, otherNationId, type NationRelations } from "./relationships";
 import { calculateNationMonthlyIncome, type NationStockpiles } from "./settlement";
 import type { Resource, Tile, World } from "./types";
 import { buildProvinceAdjacency } from "./war";
 
 export const policyDecisionIntervalMonths = 2;
+
+/** Oro mínimo para intentar expansión pacífica (colonizar neutrales cuesta 1 oro, sin tributo). */
+export const PEACEFUL_EXPAND_MIN_GOLD = 1;
 
 export type ExpansionPolicy = "none" | "control_city" | "control_resource" | "decisive_battle" | "peaceful_expand";
 export type EconomyPolicy = "construction" | "recovery" | "army_building";
@@ -133,15 +137,59 @@ export function decideNationPolicy(
   currentMonth: number,
 ): NationPolicyState {
   const profile = buildNationPolicyProfile(world, relations, stockpiles, nationId);
+  // Diplomacia primero: la expansión se empareja al mismo objetivo solo si hay guerra.
+  const diplomacy = decideDiplomacy(profile, world, stockpiles);
+  const warTargetId = diplomacy.policy === "declare_war" ? diplomacy.targetNationId : undefined;
 
   return {
-    expansion: decideExpansion(profile),
+    expansion: decideExpansion(profile, warTargetId),
     economy: decideEconomy(profile),
-    diplomacy: decideDiplomacy(profile),
+    diplomacy,
     spyMissions: decideSpyMissions(profile),
     decidedAtMonth: currentMonth,
     nextDecisionMonth: currentMonth + policyDecisionIntervalMonths,
   };
+}
+
+/** Belicosidad 0–1 determinista por nación (deriva de seed+nación, no consume RNG). */
+export function nationBellicosity(seed: string, nationId: string): number {
+  let hash = 2166136261;
+  const value = `${seed}:bellicosity:${nationId}`;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+export type BellicosityTier = "pacífica" | "equilibrada" | "belicosa";
+
+export function bellicosityTier(bellicosity: number): BellicosityTier {
+  if (bellicosity > 0.66) return "belicosa";
+  if (bellicosity < 0.33) return "pacífica";
+  return "equilibrada";
+}
+
+/** Ventaja de poder exigida para atacar por ambición según belicosidad. */
+export function ambitionPowerRatio(bellicosity: number): number {
+  const tier = bellicosityTier(bellicosity);
+  if (tier === "belicosa") return 1.15;
+  if (tier === "pacífica") return 2.0;
+  return 1.3;
+}
+
+/** Músculo mínimo (tropas por cada 1000 hab.) para ir a la guerra según belicosidad. */
+export function warMuscleThreshold(bellicosity: number): number {
+  const tier = bellicosityTier(bellicosity);
+  if (tier === "belicosa") return 8;
+  if (tier === "pacífica") return 12;
+  return 10;
+}
+
+function nationStrength(world: World, stockpiles: NationStockpiles, nationId: string): number {
+  const economy = calculateNationCityEconomy(nationId, world);
+  const stockpile = stockpiles[nationId] ?? { gold: 0, resources: {} };
+  return economy.army + economy.monthlyGold * 18 + economy.population / 18 + stockpile.gold / 2;
 }
 
 export function buildNationPolicyProfile(
@@ -172,12 +220,18 @@ export function buildNationPolicyProfile(
   const openBuildingSlots = cities.reduce((sum, city) => sum + (city.isCapital ? 12 : 8), 0);
   const armyPerThousand = economy.population > 0 ? economy.army / (economy.population / 1000) : 0;
   const strength = economy.army + economy.monthlyGold * 18 + economy.population / 18 + stockpile.gold / 2;
+  // Dominación: las IA conocen el share de cada nación (victoria al 98%).
+  const domination = getDomination(world);
+  const ownShare = domination.shares[nationId] ?? 0;
+  const leaderId = domination.leaderNationId !== nationId ? domination.leaderNationId : undefined;
+  const leaderShare = leaderId ? (domination.shares[leaderId] ?? 0) : 0;
 
   return {
     armyPerThousand,
     bestRelation,
     adjacentRelations,
     cities,
+    domination: { ownShare, leaderId, leaderShare },
     economy,
     friendlyRelations,
     hostileRelations,
@@ -195,9 +249,9 @@ export function buildNationPolicyProfile(
   };
 }
 
-function decideExpansion(profile: ReturnType<typeof buildNationPolicyProfile>): PolicyDirection<ExpansionPolicy> {
+function decideExpansion(profile: ReturnType<typeof buildNationPolicyProfile>, pairedWarTargetId?: string): PolicyDirection<ExpansionPolicy> {
   if (profile.adjacentRelations.length === 0) {
-    if (profile.stockpile.gold >= 1) {
+    if (profile.stockpile.gold >= PEACEFUL_EXPAND_MIN_GOLD) {
       return {
         policy: "peaceful_expand",
         label: expansionLabels.peaceful_expand,
@@ -216,6 +270,14 @@ function decideExpansion(profile: ReturnType<typeof buildNationPolicyProfile>): 
 
   const targetRelation = borderHostileRelation ?? borderOpportunityRelation;
   if (!targetRelation) {
+    // Sin objetivo militar viable, solo queda colonizar neutrales si hay oro.
+    if (profile.stockpile.gold >= PEACEFUL_EXPAND_MIN_GOLD) {
+      return {
+        policy: "peaceful_expand",
+        label: expansionLabels.peaceful_expand,
+        rationale: "No hostile neighbor; colonizing neutral territory.",
+      };
+    }
     return {
       policy: "none",
       label: expansionLabels.none,
@@ -224,12 +286,64 @@ function decideExpansion(profile: ReturnType<typeof buildNationPolicyProfile>): 
   }
   const targetNationId = otherNationId(targetRelation, profile.nationId);
 
-  if (profile.stockpile.gold >= 1) {
+  // Si diplomacia ya declaró guerra (odio o ambición), la expansión apunta al mismo objetivo.
+  if (pairedWarTargetId) {
+    if (profile.resourceDiversity < 4) {
+      return {
+        policy: "control_resource",
+        label: expansionLabels.control_resource,
+        rationale: "Supporting the war effort by seizing supplies from the war target.",
+        targetNationId: pairedWarTargetId,
+        targetResource: profile.lowestResource,
+      };
+    }
+    if (profile.cities.length < Math.max(3, Math.floor(profile.provinces.length / 7))) {
+      return {
+        policy: "control_city",
+        label: expansionLabels.control_city,
+        rationale: "Supporting the war effort by capturing cities from the war target.",
+        targetNationId: pairedWarTargetId,
+      };
+    }
+    return {
+      policy: "decisive_battle",
+      label: expansionLabels.decisive_battle,
+      rationale: "Full-scale confrontation against the war target.",
+      targetNationId: pairedWarTargetId,
+    };
+  }
+
+  // Si el vecino es hostil y tenemos músculo, la vía militar compite con la pacífica.
+  const bellicosity = nationBellicosity(profile.world.seed, profile.nationId);
+  const canPeaceful = profile.stockpile.gold >= PEACEFUL_EXPAND_MIN_GOLD;
+  const hasMilitaryEdge = profile.armyPerThousand >= warMuscleThreshold(bellicosity) || profile.strength > 9000;
+  if (borderHostileRelation && hasMilitaryEdge && !canPeaceful) {
+    // sin oro -> militar directo (caso clásico)
+  } else if (borderHostileRelation && hasMilitaryEdge && targetRelation.attitude <= -25) {
+    // hostilidad severa: aunque haya oro, no esconder la opción militar;
+    // se deja que decideDiplomacy declare la guerra y la expansión elija objetivo militar.
+    if (profile.resourceDiversity < 4) {
+      return {
+        policy: "control_resource",
+        label: expansionLabels.control_resource,
+        rationale: `Hostile border (attitude ${targetRelation.attitude}); seizing supplies despite gold reserves.`,
+        targetNationId,
+        targetResource: profile.lowestResource,
+      };
+    }
+    return {
+      policy: "decisive_battle",
+      label: expansionLabels.decisive_battle,
+      rationale: `Severe hostility (${targetRelation.attitude}) with military edge; confronting directly.`,
+      targetNationId,
+    };
+  }
+
+  if (canPeaceful) {
     return {
       policy: "peaceful_expand",
       label: expansionLabels.peaceful_expand,
-      rationale: "Expanding peacefully through diplomacy and gold payment.",
-      targetNationId,
+      rationale: "Expanding peacefully through diplomacy and gold payment (neutral territory only).",
     };
   }
 
@@ -284,10 +398,94 @@ function decideEconomy(profile: ReturnType<typeof buildNationPolicyProfile>): Po
   };
 }
 
-function decideDiplomacy(profile: ReturnType<typeof buildNationPolicyProfile>): PolicyDirection<DiplomacyPolicy> {
-  const canPeacefulExpand = profile.stockpile.gold >= 1;
-  const adjacentNations = profile.adjacentRelations.map((r) => otherNationId(r, profile.nationId));
+function decideDiplomacy(
+  profile: ReturnType<typeof buildNationPolicyProfile>,
+  world: World,
+  stockpiles: NationStockpiles,
+): PolicyDirection<DiplomacyPolicy> {
+  const bellicosity = nationBellicosity(world.seed, profile.nationId);
+  const muscleThreshold = warMuscleThreshold(bellicosity);
+  const canPeacefulExpand = profile.stockpile.gold >= PEACEFUL_EXPAND_MIN_GOLD;
   const hostileAdjacent = profile.adjacentRelations.filter((r) => r.attitude <= -10);
+  const hasMilitaryEdge = profile.armyPerThousand >= muscleThreshold || profile.strength > 9000;
+
+  // 1. Odio: guerra por hostilidad severa aunque haya oro.
+  const severeHostile = hostileAdjacent.find((r) => r.attitude <= -25);
+  if (severeHostile && hasMilitaryEdge) {
+    const targetNationId = otherNationId(severeHostile, profile.nationId);
+    return {
+      policy: "declare_war",
+      label: diplomacyLabels.declare_war,
+      rationale: "Severe border hostility with military edge; declaring war despite reserves.",
+      targetNationId,
+    };
+  }
+
+  // 1b. Miedo al hegemón: hostil (no severo) + músculo basta contra el líder.
+  const hegemonFearId = profile.domination.leaderShare >= HEGEMONY_ALERT_SHARE
+    ? profile.domination.leaderId
+    : undefined;
+  if (hegemonFearId && hasMilitaryEdge) {
+    const hegemonHostile = hostileAdjacent.find(
+      (r) => otherNationId(r, profile.nationId) === hegemonFearId,
+    );
+    if (hegemonHostile) {
+      return {
+        policy: "declare_war",
+        label: diplomacyLabels.declare_war,
+        rationale: "Hegemon threatens domination; striking first with military edge.",
+        targetNationId: hegemonFearId,
+      };
+    }
+  }
+
+  // 2. Ambición: atacar al vecino adyacente más débil si la ventaja de poder
+  // supera el umbral de belicosidad (belicosa 1.15×, equilibrada 1.3×, pacífica 2×).
+  // La guerra cuesta (upkeep ×1.5, bajas, moral, treguas): solo compensa al fuerte.
+  // Las IA conocen la dominación: ante un hegemón (≥70%) lo prefieren como
+  // objetivo, y el líder en rush (≥90%) baja su exigencia.
+  if (hasMilitaryEdge && profile.armyPerThousand >= 6) {
+    const hegemonId = profile.domination.leaderShare >= HEGEMONY_ALERT_SHARE
+      ? profile.domination.leaderId
+      : undefined;
+    const rushing = profile.domination.ownShare >= VICTORY_RUSH_SHARE;
+    const ordered = [...profile.adjacentRelations].sort((a, b) => {
+      const aIsHegemon = hegemonId !== undefined && otherNationId(a, profile.nationId) === hegemonId ? 0 : 1;
+      const bIsHegemon = hegemonId !== undefined && otherNationId(b, profile.nationId) === hegemonId ? 0 : 1;
+      return aIsHegemon - bIsHegemon;
+    });
+    let weakestId: string | undefined;
+    let bestRatio = 0;
+    let bestRationale = "";
+    for (const relation of ordered) {
+      const targetId = otherNationId(relation, profile.nationId);
+      const targetStrength = nationStrength(world, stockpiles, targetId);
+      if (targetStrength <= 0) continue;
+      const ratio = profile.strength / targetStrength;
+      let neededRatio = ambitionPowerRatio(bellicosity);
+      let motive = "war of ambition";
+      if (targetId === hegemonId) {
+        neededRatio *= 0.9;
+        motive = "anti-hegemony war";
+      } else if (rushing) {
+        neededRatio *= 0.85;
+        motive = "final rush to domination";
+      }
+      if (ratio >= neededRatio && ratio > bestRatio) {
+        bestRatio = ratio;
+        weakestId = targetId;
+        bestRationale = `Power advantage ${ratio.toFixed(2)}× over neighbor justifies ${motive} (${bellicosityTier(bellicosity)}).`;
+      }
+    }
+    if (weakestId) {
+      return {
+        policy: "declare_war",
+        label: diplomacyLabels.declare_war,
+        rationale: bestRationale,
+        targetNationId: weakestId,
+      };
+    }
+  }
 
   if (hostileAdjacent.length > 0 && !canPeacefulExpand) {
     const target = hostileAdjacent[0];
@@ -465,17 +663,23 @@ export function getAdjacentEnemyTiles(world: World, nationId: string, profile: R
 export function calculatePeacefulExpandCost(tile: Tile, world: World): { gold: number; population: number; tribute: number; type: "neutral" | "province" } {
   const province = world.provinces.find(p => p.id === tile.provinceId);
   const cityCount = world.cities.filter(c => c.provinceId === tile.provinceId).length;
-  const tilePopulation = province ? province.population : 0;
+  // Fuente única de población: las ciudades (Province no tiene campo population).
+  const tilePopulation = world.cities
+    .filter((c) => c.provinceId === tile.provinceId)
+    .reduce((sum, c) => sum + c.population, 0);
   const isNeutral = !province || province.nationId === undefined;
 
   if (isNeutral) {
+    // Colonizar neutral cuesta 1 oro fijo, sin reembolso posterior (sin exploit).
     return { gold: 1, population: 0, tribute: 0, type: "neutral" };
   }
 
+  // Provincias con dueño NO se pueden tomar pacíficamente (requieren guerra).
+  // Se devuelve coste impagable para bloquear la vía pacífica hacia enemigos.
   const populationTribute = Math.round(tilePopulation * 0.05 * 100) / 100;
   const cityTribute = cityCount * 30;
 
-  return { gold: 1, population: tilePopulation, tribute: populationTribute + cityTribute, type: "province" };
+  return { gold: Number.POSITIVE_INFINITY, population: tilePopulation, tribute: populationTribute + cityTribute, type: "province" };
 }
 
 export function canAffordPeacefulExpand(cost: {gold: number; population: number; tribute: number; type: string}, stockpile: {gold: number; resources: Record<string, number>}): boolean {

@@ -104,16 +104,14 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
 }
 
 function validateTarget(decision: LLMDecision, context: NationTurnContext): string | null {
-  const validTargets = context.world.nations
-    .filter((n) => n.id !== context.nationId)
-    .map((n) => n.id);
-  if (decision.targetNationId && validTargets.includes(decision.targetNationId)) {
+  const others = context.world.nations.filter((n) => n.id !== context.nationId);
+  const validIds = others.map((n) => n.id);
+  if (decision.targetNationId && validIds.includes(decision.targetNationId)) {
     return decision.targetNationId;
   }
-  const weakest = validTargets
-    .map((id) => ({ id, pop: (context.world.cities.filter((c) => c.nationId === id).reduce((s, c) => s + c.population, 0)) }))
-    .sort((a, b) => a.pop - b.pop);
-  return weakest[0]?.id ?? null;
+  // Sin objetivo válido: no inventar uno débil (antes forzaba al más débil
+  // aunque fuera aliado). Devolver null y dejar que policyAI decida.
+  return null;
 }
 
 function buildPrompt(context: NationTurnContext, config: NationModelConfig): string {
@@ -149,8 +147,7 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `    You steal the city, its population, and its resources. Use this to grow when you are weak.`,
     `  expansion:"control_resource" + targetNationId: Seize resource tiles from that nation.`,
     `  expansion:"decisive_battle" + targetNationId: Launch a full-scale invasion.`,
-    `  expansion:"declare_war" + targetNationId: Start a war against that nation.`,
-    `  expansion:"peaceful_expand" + targetNationId: Expand peacefully by paying gold and population. No war needed.`,
+    `  expansion:"peaceful_expand": Colonize NEUTRAL territory by paying gold (no target needed, never steals enemy land). No war needed.`,
     `  expansion:"none": Do not expand militarily this turn.`,
     ``,
     `  economy:"army_building": Build military units (needed before attacking).`,
@@ -168,7 +165,7 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `Current policies: Expansion=${policy?.expansion?.policy ?? "unknown"}, Economy=${policy?.economy?.policy ?? "unknown"}, Diplomacy=${policy?.diplomacy?.policy ?? "unknown"}`,
     ``,
     "Respond ONLY with valid JSON, no explanation, no analysis, no reasoning text:",
-    '{"expansion":"declare_war"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","targetNationId":"nation_id","rationale":"brief reason"}',
+    '{"expansion":"control_city"|"control_resource"|"decisive_battle"|"peaceful_expand"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","targetNationId":"nation_id","rationale":"brief reason"}',
   ].join("\n");
 }
 
@@ -227,16 +224,23 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
 
   const sim = context.simulation as any;
   const nationPolicies = sim.nationPolicies[context.nationId] || {};
+  const validExpansions = new Set(["control_city", "control_resource", "decisive_battle", "peaceful_expand", "none"]);
+  const validEconomies = new Set(["army_building", "construction", "recovery"]);
+  const validDiplomacies = new Set(["declare_war", "seek_alliance", "seek_peace", "seek_vassalage", "demand_vassalage", "none", "surrender"]);
 
-  if (decision.expansion && decision.expansion !== "none") {
-    const expansionPolicy = decision.expansion === "control_city" ? "control_city" : decision.expansion;
+  // Sanitizar: "declare_war" no es ExpansionPolicy válida; va por diplomacia.
+  let expansion = validExpansions.has(decision.expansion) ? decision.expansion : "none";
+  if ((decision.expansion as string) === "declare_war") expansion = "none";
+
+  if (expansion && expansion !== "none") {
     nationPolicies.expansion = {
-      policy: expansionPolicy as any,
-      label: expansionPolicy,
+      policy: expansion as any,
+      label: expansion,
       rationale: decision.rationale || "",
-      targetNationId: decision.targetNationId || undefined,
+      // peaceful_expand no usa targetNationId (solo neutrales)
+      targetNationId: expansion === "peaceful_expand" ? undefined : (decision.targetNationId || undefined),
       targetTileId: decision.targetTileId || undefined,
-      targetResource: decision.expansion === "control_resource" ? "grain" : undefined,
+      targetResource: expansion === "control_resource" ? "grain" : undefined,
       decidedAtMonth: context.turnNumber,
       nextDecisionMonth: context.turnNumber + 2,
     };
@@ -244,7 +248,7 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
     nationPolicies.expansion = { ...nationPolicies.expansion, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
   }
 
-  if (decision.economy && decision.economy !== "none") {
+  if (decision.economy && validEconomies.has(decision.economy)) {
     nationPolicies.economy = {
       policy: decision.economy as any,
       label: decision.economy,
@@ -256,7 +260,7 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
     nationPolicies.economy = { ...nationPolicies.economy, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
   }
 
-  if (decision.diplomacy && decision.diplomacy !== "none") {
+  if (decision.diplomacy && validDiplomacies.has(decision.diplomacy) && decision.diplomacy !== "none") {
     nationPolicies.diplomacy = {
       policy: decision.diplomacy as any,
       label: decision.diplomacy,
@@ -273,14 +277,9 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
   nationPolicies.decidedAtMonth = context.turnNumber;
   nationPolicies.nextDecisionMonth = context.turnNumber + 2;
 
-  if (decision.targetNationId && (decision.diplomacy === "declare_war" || decision.expansion === "decisive_battle")) {
-    sim.events.push({
-      kind: "war_declared",
-      month: context.turnNumber,
-      nationIds: [context.nationId, decision.targetNationId],
-      type: "war_declared",
-    } as any);
-  }
+  // NO inventar eventos war_declared aquí: la guerra real la crea
+  // executeDiplomacyPoliciesWithEvents en resolveTurn a partir de nationPolicies.
+  // (Antes se pusheaba un evento fantasma sin WarState, falseando conteos del script 004.)
 
   sim.nationPolicies[context.nationId] = nationPolicies;
 }

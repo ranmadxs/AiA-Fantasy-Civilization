@@ -36,6 +36,11 @@ const TILE_SIZE = 14;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 4.5;
 
+/** Relleno político: naciones conservan su color con presencia marcada. */
+const NATION_FILL_ALPHA = 0.58;
+/** Tierra libre: gris neutro siempre visible, por encima del tinte nacional. */
+const FREE_TERRITORY_FILL = { color: 0x9aa3a8, alpha: 0.7 };
+
 const terrainColors = {
   ocean: 0x315f8f,
   coast: 0x4a89a8,
@@ -80,6 +85,13 @@ export function WorldMap({
   const armyPathsRef = useRef<Graphics | null>(null);
   const selectedLayerRef = useRef<Graphics | null>(null);
   const neonTravelLightRef = useRef<Graphics | null>(null);
+  const neonEdgesRef = useRef<Map<string, MapEdge[]>>(new Map());
+  const nationLabelsRef = useRef<Container | null>(null);
+  const ownershipRef = useRef<Graphics | null>(null);
+  const nationGlowRef = useRef<Graphics | null>(null);
+  const nationBordersRef = useRef<Graphics | null>(null);
+  const citiesRef = useRef<Graphics | null>(null);
+  const cityLabelsRef = useRef<Container | null>(null);
   const tileByCoord = useMemo(
     () => new Map(world.tiles.map((tile) => [`${tile.x},${tile.y}`, tile])),
     [world],
@@ -173,7 +185,15 @@ export function WorldMap({
       viewportRef.current = viewport;
       pixiApp.stage.addChild(viewport);
 
-      drawWorld(viewport, world, mapMode, tileByCoord, language, eraState);
+      const layers = drawWorld(viewport, world, mapMode, tileByCoord, language, eraState);
+      nationLabelsRef.current = layers.nationLabels;
+      ownershipRef.current = layers.ownership;
+      nationGlowRef.current = layers.nationBorderGlow;
+      nationBordersRef.current = layers.nationBorders;
+      citiesRef.current = layers.cities;
+      cityLabelsRef.current = layers.cityLabels;
+      // Bordes por nación precomputados una vez (el neón los recorre cada frame).
+      neonEdgesRef.current = groupEdgesByNation(world.nationEdges);
       // Filtro Tolkien SOLO en modo terreno: político y recursos van planos.
       // Diagnóstico por URL: ?tolkien=off (plano puro) o ?tolkien=-coast,-sea, etc.
       if (mapMode === "terrain") {
@@ -309,10 +329,19 @@ export function WorldMap({
       animFrame += dt;
 
       const neonLight = neonTravelLightRef.current;
-      if (neonLight && mapMode === "political") {
+      if (!neonLight) {
+        animFrameId = requestAnimationFrame(animate);
+        return;
+      }
+      if (mapMode !== "political") {
+        neonLight.clear();
+        animFrameId = requestAnimationFrame(animate);
+        return;
+      }
+      {
         neonLight.clear();
         for (const nation of world.nations) {
-          const nationEdges = world.nationEdges.filter((e) => e.nationId === nation.id);
+          const nationEdges = neonEdgesRef.current.get(nation.id) ?? [];
           if (nationEdges.length === 0) continue;
 
           const edgeLengths = nationEdges.map((e) =>
@@ -384,6 +413,7 @@ export function WorldMap({
       armyLabelsRef.current = null;
       armyPathsRef.current = null;
       selectedLayerRef.current = null;
+      nationLabelsRef.current = null;
       appRef.current = null;
       viewportRef.current = null;
       if (app?.canvas.parentElement === host) {
@@ -391,7 +421,7 @@ export function WorldMap({
       }
       app?.destroy(true, { children: true });
     };
-  }, [world, mapMode, mapRevision, onSelectCity, onSelectProvince, tileByCoord, language, eraState]);
+  }, [world, mapMode, onSelectCity, onSelectProvince, tileByCoord, language, eraState]);
 
   useEffect(() => {
     const armies = armyGraphicsRef.current;
@@ -408,6 +438,46 @@ export function WorldMap({
       drawArmyGroups(armies, armyPaths, armyLabels, world, armyGroups);
     }
   }, [armyGroups, mapMode, world]);
+
+  useEffect(() => {
+    // Zoom: solo reescala etiquetas (barato). El redibujado pesado va abajo.
+    const labels = nationLabelsRef.current;
+    if (labels) {
+      const inverse = 1 / Math.max(MIN_SCALE, zoom);
+      for (const child of labels.children) {
+        child.scale.set(inverse);
+      }
+    }
+  }, [zoom]);
+
+  useEffect(() => {
+    // Refresco en vivo por turno: solo capas dinámicas (propiedad, bordes,
+    // ciudades, etiquetas). El terreno y el filtro Tolkien no se tocan.
+    const layers = ownershipRef.current &&
+      nationGlowRef.current &&
+      nationBordersRef.current &&
+      citiesRef.current &&
+      cityLabelsRef.current &&
+      nationLabelsRef.current
+      ? {
+        cityLabels: cityLabelsRef.current,
+        cities: citiesRef.current,
+        nationBorderGlow: nationGlowRef.current,
+        nationBorders: nationBordersRef.current,
+        nationLabels: nationLabelsRef.current,
+        ownership: ownershipRef.current,
+      }
+      : undefined;
+    if (!layers) {
+      return;
+    }
+    refreshDynamicLayers(layers, world, mapMode, language, eraState);
+    neonEdgesRef.current = groupEdgesByNation(world.nationEdges);
+    const inverse = 1 / Math.max(MIN_SCALE, zoom);
+    for (const child of layers.nationLabels.children) {
+      child.scale.set(inverse);
+    }
+  }, [mapRevision, world, mapMode, language, eraState, tileByCoord]);
 
   useEffect(() => {
     const selectedLayer = selectedLayerRef.current;
@@ -485,7 +555,7 @@ function drawWorld(
   tileByCoord: Map<string, Tile>,
   language: Language,
   eraState: Record<string, EraState>,
-) {
+): DynamicMapLayers {
   const terrain = new Graphics();
   const ownership = new Graphics();
   const resources = new Graphics();
@@ -496,27 +566,57 @@ function drawWorld(
   const cityLabels = new Container();
   const nationLabels = new Container();
 
+  container.addChild(
+    terrain,
+    ownership,
+    resources,
+    provinceBorders,
+    nationBorderGlow,
+    nationBorders,
+    cities,
+    cityLabels,
+    nationLabels,
+  );
+
+  const layers: DynamicMapLayers = {
+    cityLabels,
+    cities,
+    nationBorderGlow,
+    nationBorders,
+    nationLabels,
+    ownership,
+    provinceBorders,
+    resources,
+    terrain,
+  };
+  drawStaticLayers(layers, world, mapMode);
+  refreshDynamicLayers(layers, world, mapMode, language, eraState);
+  return layers;
+}
+
+type DynamicMapLayers = {
+  terrain: Graphics;
+  ownership: Graphics;
+  resources: Graphics;
+  provinceBorders: Graphics;
+  nationBorderGlow: Graphics;
+  nationBorders: Graphics;
+  cities: Graphics;
+  cityLabels: Container;
+  nationLabels: Container;
+};
+
+/** Capas que no cambian entre turnos: terreno, recursos, bordes de provincia. */
+function drawStaticLayers(
+  layers: DynamicMapLayers,
+  world: World,
+  mapMode: MapMode,
+): void {
+  const { terrain, resources, provinceBorders } = layers;
   for (const tile of world.tiles) {
     const x = tile.x * TILE_SIZE;
     const y = tile.y * TILE_SIZE;
     terrain.rect(x, y, TILE_SIZE, TILE_SIZE).fill(terrainColors[tile.terrain]);
-
-    if (tile.provinceId) {
-      const province = world.provinceById.get(tile.provinceId);
-      if (!province) {
-        continue;
-      }
-
-      if (!province.nationId) {
-        continue;
-      }
-      const nation = world.nationById.get(province.nationId);
-      if (nation && mapMode === "political") {
-        ownership
-          .rect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2)
-          .fill({ color: nation.numericColor, alpha: 0.48 });
-      }
-    }
 
     if (tile.resource && mapMode === "resources") {
       const radius = 4.4;
@@ -530,24 +630,61 @@ function drawWorld(
   }
 
   drawDashedEdges(provinceBorders, world.provinceEdges, 0xe8f2dc, 0.95, 4, 3, 0.58);
+}
+
+/** Capas que cambian cada turno: propiedad, bordes de nación, ciudades y etiquetas. */
+function refreshDynamicLayers(
+  layers: Pick<
+    DynamicMapLayers,
+    "ownership" | "nationBorderGlow" | "nationBorders" | "cities" | "cityLabels" | "nationLabels"
+  >,
+  world: World,
+  mapMode: MapMode,
+  language: Language,
+  eraState: Record<string, EraState>,
+): void {
+  const { ownership, nationBorderGlow, nationBorders, cities, cityLabels, nationLabels } = layers;
+  ownership.clear();
+  for (const tile of world.tiles) {
+    const x = tile.x * TILE_SIZE;
+    const y = tile.y * TILE_SIZE;
+
+    if (tile.provinceId) {
+      const province = world.provinceById.get(tile.provinceId);
+      if (!province) {
+        continue;
+      }
+
+      if (!province.nationId) {
+        // Tierra libre: siempre visible, sin opción para ocultarla.
+        // Tinte gris neutro para distinguirla del terreno base y de las naciones.
+        if (mapMode === "political") {
+          ownership
+            .rect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2)
+            .fill({ color: FREE_TERRITORY_FILL.color, alpha: FREE_TERRITORY_FILL.alpha });
+        }
+        continue;
+      }
+      const nation = world.nationById.get(province.nationId);
+      if (nation && mapMode === "political") {
+        ownership
+          .rect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2)
+          .fill({ color: nation.numericColor, alpha: NATION_FILL_ALPHA });
+      }
+    }
+  }
+
+  nationBorderGlow.clear();
   drawNationEdges(nationBorderGlow, world.nationEdges, world, 4.4, 0.84);
+  nationBorders.clear();
   drawSolidEdges(nationBorders, world.nationEdges, 0xf8fbf1, 1.65, 0.94);
+  cities.clear();
+  cityLabels.removeChildren();
   if (mapMode === "political") {
     drawCities(cities, cityLabels, world, language, eraState);
   }
+  nationLabels.removeChildren();
   drawNationLabels(nationLabels, world, language, mapMode);
-
-  container.addChild(
-    terrain,
-    ownership,
-    resources,
-    provinceBorders,
-    nationBorderGlow,
-    nationBorders,
-    cities,
-    cityLabels,
-    nationLabels,
-  );
 }
 
 function syncRendererSize(app: Application, host: HTMLElement, world: World) {
@@ -751,6 +888,17 @@ function createCityLabel(
   return label;
 }
 
+function groupEdgesByNation(edges: MapEdge[]): Map<string, MapEdge[]> {
+  const byNation = new Map<string, MapEdge[]>();
+  for (const edge of edges) {
+    if (!edge.nationId) continue;
+    const list = byNation.get(edge.nationId) ?? [];
+    list.push(edge);
+    byNation.set(edge.nationId, list);
+  }
+  return byNation;
+}
+
 function drawNationEdges(
   graphics: Graphics,
   edges: MapEdge[],
@@ -908,25 +1056,231 @@ function drawNationLabels(container: Container, world: World, language: Language
     }
 
     const isCentered = mapMode === "political" && !isDead;
+    if (isCentered) {
+      const mapamundi = buildMapamundiLabel(world, nation, language);
+      if (mapamundi) {
+        container.addChild(mapamundi);
+      }
+      continue;
+    }
+
     const label = new Text({
       text: getLocalizedName(nation, language),
       style: {
         fill: 0xf8fbf1,
         fontFamily: "Arial",
-        fontSize: isCentered ? 24 : 15,
+        fontSize: 15,
         fontWeight: "700",
-        stroke: { color: 0x10161b, width: isCentered ? 6 : 4 },
+        stroke: { color: 0x10161b, width: 4 },
       },
     });
 
-    if (isCentered) {
-      label.anchor.set(0.5);
-      label.position.set(x * TILE_SIZE, y * TILE_SIZE);
-    } else {
-      label.position.set(x * TILE_SIZE + TILE_SIZE * 0.7, y * TILE_SIZE - TILE_SIZE * 0.9);
-    }
+    label.position.set(x * TILE_SIZE + TILE_SIZE * 0.7, y * TILE_SIZE - TILE_SIZE * 0.9);
     container.addChild(label);
   }
+}
+
+/** Caja del territorio propio en px + centroide. */
+function nationTerritoryBox(world: World, nationId: string) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let count = 0;
+  for (const province of world.provinces) {
+    if (province.nationId !== nationId) continue;
+    count += 1;
+    minX = Math.min(minX, province.centerX);
+    minY = Math.min(minY, province.centerY);
+    maxX = Math.max(maxX, province.centerX);
+    maxY = Math.max(maxY, province.centerY);
+  }
+  if (count === 0) return undefined;
+  return {
+    // Ancho/alto mínimos de 3 tiles para naciones de una provincia.
+    w: Math.max(3, maxX - minX + 1) * TILE_SIZE,
+    h: Math.max(3, maxY - minY + 1) * TILE_SIZE,
+  };
+}
+
+const MAPAMUNDI_BASE_SIZE = 12;
+const MAPAMUNDI_MIN_SIZE = 8;
+const MAPAMUNDI_LETTER_SPACING = 3;
+const MAPAMUNDI_INITIAL_SCALE = 2.4;
+
+/**
+ * Rótulo estilo mapamundi: anclado junto a la capital (sin taparla),
+ * rotado hacia el interior, tamaño que cabe en el territorio,
+ * letras con curva de perspectiva e inicial dorada adornada.
+ */
+function buildMapamundiLabel(world: World, nation: World["nations"][number], language: Language) {
+  const name = getLocalizedName(nation, language).toUpperCase();
+  if (!name) return undefined;
+  const box = nationTerritoryBox(world, nation.id);
+  const centroid = nationTerritoryCentroid(world, nation.id);
+  const capitalCity = nation.capitalCityId ? world.cityById.get(nation.capitalCityId) : undefined;
+  const capitalProvince = world.provinceById.get(nation.capitalProvinceId);
+  const capX = capitalCity?.x ?? capitalProvince?.centerX;
+  const capY = capitalCity?.y ?? capitalProvince?.centerY;
+  if (capX === undefined || capY === undefined || !box || !centroid) return undefined;
+
+  // Dirección capital → interior (si coinciden, rumbo fijo suave).
+  let dx = centroid.x - capX;
+  let dy = centroid.y - capY;
+  if (Math.hypot(dx, dy) < 0.01) {
+    dx = 1;
+    dy = 0.2;
+  }
+  const len = Math.hypot(dx, dy);
+  dx /= len;
+  dy /= len;
+  // Ángulo con carácter: eje capital→interior, rango ±45°, nunca recto
+  // (si sale casi horizontal se inclina ±12° según hash determinista).
+  let angle = Math.atan2(dy, dx);
+  angle = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, angle));
+  if (Math.abs(angle) < (8 * Math.PI) / 180) {
+    let hash = 0;
+    for (let i = 0; i < nation.id.length; i += 1) hash = (hash * 31 + nation.id.charCodeAt(i)) | 0;
+    angle = (hash % 2 === 0 ? 1 : -1) * (12 * Math.PI / 180);
+  }
+
+  // Tamaño que cabe en el territorio (diagonal útil al 95%).
+  const probe = new Text({
+    text: name,
+    style: {
+      fontFamily: ["Georgia", "Times New Roman", "serif"],
+      fontSize: MAPAMUNDI_BASE_SIZE,
+      fontWeight: "700",
+      letterSpacing: MAPAMUNDI_LETTER_SPACING,
+    },
+  });
+  const maxLen = Math.hypot(box.w, box.h) * 0.95;
+  const fontSize = Math.max(MAPAMUNDI_MIN_SIZE, Math.min(MAPAMUNDI_BASE_SIZE, MAPAMUNDI_BASE_SIZE * (maxLen / Math.max(1, probe.width))));
+  probe.destroy();
+  const spacing = MAPAMUNDI_LETTER_SPACING * (fontSize / MAPAMUNDI_BASE_SIZE);
+
+  // Ancla: sale de la capital hacia adentro, despejando el icono.
+  const clearance = 12 + fontSize * 0.8 + 6;
+  const anchorX = (capX + dx * (clearance / TILE_SIZE)) * TILE_SIZE;
+  const anchorY = (capY + dy * (clearance / TILE_SIZE)) * TILE_SIZE;
+
+  const group = new Container();
+  group.position.set(anchorX, anchorY);
+  const serif = ["Georgia", "Times New Roman", "serif"] as const;
+  // Nombre completo en hasta 2 filas: reparte palabras balanceando largo.
+  const words = name.split(" ").filter((w) => w.length > 0);
+  const rows: string[][] = (() => {
+    if (words.length <= 1) return [[...name]];
+    let best = 1;
+    let bestDiff = Infinity;
+    for (let cut = 1; cut < words.length; cut += 1) {
+      const a = words.slice(0, cut).join(" ").length;
+      const b = words.slice(cut).join(" ").length;
+      const diff = Math.abs(a - b);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = cut;
+      }
+    }
+    return [[...words.slice(0, best).join(" ")], [...words.slice(best).join(" ")]];
+  })();
+  // Letras con medidas finales antes de posicionar (curva por fila).
+  const initialSize = fontSize * MAPAMUNDI_INITIAL_SCALE;
+  const rowLetters = rows.map((rowChars, rowIdx) =>
+    rowChars.map((ch, i) => {
+      const t = rowChars.length <= 1 ? 0.5 : i / (rowChars.length - 1);
+      const isInitial = rowIdx === 0 && i === 0;
+      const size = (isInitial ? initialSize : fontSize * (0.8 + 0.2 * Math.sin(Math.PI * t)));
+      const letter = new Text({
+        text: ch === " " ? " " : ch,
+        style: {
+          fill: isInitial ? 0xe8c66a : 0xf3e9d2,
+          fontFamily: [...serif],
+          fontSize: size,
+          fontWeight: "700",
+          fontStyle: "italic",
+          stroke: { color: 0x2a1f14, width: Math.max(2, size / 5) },
+        },
+      });
+      return letter;
+    }),
+  );
+  const rowWidth = (letters: Text[]) =>
+    letters.reduce((s, l) => s + l.width, 0) + spacing * Math.max(0, letters.length - 1);
+  // La 2da fila se sangra tras la inicial grande (mínimo 3 espacios) para no taparla.
+  const spaceW = fontSize * 0.32;
+  const rowIndent = rowLetters.length > 1 && rowLetters[0].length > 0
+    ? Math.max(spaceW * 3, rowLetters[0][0].width + spacing)
+    : 0;
+  const estLen = Math.max(
+    rowLetters.length > 0 ? rowWidth(rowLetters[0]) : 0,
+    rowLetters.length > 1 ? rowIndent + rowWidth(rowLetters[1]) : 0,
+  );
+
+  // Si en horizontal sale de la pantalla → modo vertical (de arriba hacia abajo).
+  const mapW = world.width * TILE_SIZE;
+  const mapH = world.height * TILE_SIZE;
+  const margin = TILE_SIZE;
+  const endX = anchorX + dx * estLen;
+  const endY = anchorY + dy * estLen;
+  const overflows = endX > mapW - margin || endX < margin || endY > mapH - margin || endY < margin;
+
+  const boxPad = 3;
+  if (!overflows) {
+    group.rotation = angle;
+    // El texto nace en el ancla y fluye hacia adentro (nunca vuelve sobre la capital).
+    // Dos filas centradas sobre el ancla.
+    const lineH = fontSize * 1.2;
+    const y0 = rowLetters.length > 1 ? -lineH / 2 : 0;
+    rowLetters.forEach((letters, rowIdx) => {
+      // Segunda fila sangrada: no tapa la inicial grande.
+      let cursorX = rowIdx > 0 ? rowIndent : 0;
+      const baseY = y0 + rowIdx * lineH;
+      letters.forEach((letter, idx) => {
+        const isInitial = rowIdx === 0 && idx === 0;
+        if (isInitial) {
+          // Caja iluminada tras la inicial (aire de libro antiguo).
+          const illumBox = new Graphics();
+          illumBox
+            .rect(cursorX - boxPad, baseY - initialSize * 0.62 - boxPad, initialSize * 0.95 + boxPad * 2, initialSize * 1.24 + boxPad * 2)
+            .fill({ color: 0x2a1f14, alpha: 0.55 })
+            .stroke({ color: 0xe8c66a, width: 1.5, alpha: 0.9 });
+          group.addChild(illumBox);
+        }
+        letter.anchor.set(0, 0.5);
+        // Drop-cap: la inicial cuelga por debajo de la línea base.
+        letter.position.set(cursorX, baseY + (isInitial ? letter.height * 0.14 : 0));
+        group.addChild(letter);
+        cursorX += letter.width + spacing;
+      });
+    });
+    return group;
+  }
+
+  // Modo vertical: nombre completo en una columna (sin filas).
+  const letters = rowLetters.flat();
+  const estH = letters.reduce((s, l) => s + l.height, 0) + spacing * Math.max(0, letters.length - 1);
+  const upward = anchorY + estH > mapH - margin;
+  const dirY = upward ? -1 : 1;
+  const first = letters[0];
+  if (first) {
+    const fw = first.width;
+    const fh = first.height;
+    const illumBox = new Graphics();
+    illumBox
+      .rect(-fw / 2 - boxPad, (upward ? -fh : 0) - boxPad, fw + boxPad * 2, fh + boxPad * 2)
+      .fill({ color: 0x2a1f14, alpha: 0.55 })
+      .stroke({ color: 0xe8c66a, width: 1.5, alpha: 0.9 });
+    group.addChild(illumBox);
+  }
+  let cursorY = 0;
+  for (const letter of letters) {
+    letter.anchor.set(0.5, upward ? 1 : 0);
+    letter.position.set(0, cursorY);
+    group.addChild(letter);
+    cursorY += dirY * (letter.height + spacing);
+  }
+  return group;
 }
 
 /** Centro del territorio: promedio de centros de provincia ponderado por tiles. */
