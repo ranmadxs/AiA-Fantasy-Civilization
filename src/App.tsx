@@ -1455,7 +1455,7 @@ function ConstructionQueue({ projects, nations, minasDeCarbon, aserraderos }: { 
       {building.map((project) => (
         <article className="eventRow construction ingenieriaEvent" key={project.id}>
           <div>
-            <strong>🚧 {nameOf(project.nationId)} — {project.kind === "barracks" ? "cuartel" : project.kind === "stable" ? "establo" : project.kind === "mina_carbon" ? "mina de carbón" : project.kind === "aserradero" ? "aserradero" : project.kind === "mina_hierro" ? "mina de hierro" : project.kind === "fabrica_armas" ? "fábrica de armas" : project.kind === "ciudad" ? `ciudad ${project.era}` : project.kind === "reino" ? `reino 👑 ${project.era}` : `pueblo ${project.era}`}</strong>
+            <strong>🚧 {nameOf(project.nationId)} — {project.kind === "barracks" ? "cuartel" : project.kind === "granja" ? "granja" : project.kind === "stable" ? "establo" : project.kind === "mina_carbon" ? "mina de carbón" : project.kind === "aserradero" ? "aserradero" : project.kind === "pozo" ? "pozo de agua" : project.kind === "mina_hierro" ? "mina de hierro" : project.kind === "fabrica_armas" ? "fábrica de armas" : project.kind === "ciudad" ? `ciudad ${project.era}` : project.kind === "reino" ? `reino 👑 ${project.era}` : `pueblo ${project.era}`}</strong>
             <span>{project.remainingTurns} meses restantes</span>
           </div>
           <em className="ingenieriaBadge">🏗️ Construcción</em>

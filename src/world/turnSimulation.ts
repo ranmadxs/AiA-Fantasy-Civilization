@@ -23,10 +23,17 @@ import {
   findAdjacentFreeTiles,
   formatConstructionBudget,
   getConstructionSpec,
+  GRANJA_MAX_NIVEL,
+  granjaOutput,
+  granjaUpgradeEligible,
   indexFabricas,
   indexProvinceBuildings,
   isTileOccupied,
   missingQuota,
+  POZO_MAX_NIVEL,
+  pozoOutput,
+  pozoSpotEligible,
+  pozoUpgradeEligible,
   progressConstruction,
   stableUpgradeEligible,
   trasladoOutcome,
@@ -35,6 +42,8 @@ import {
   type MinaDeCarbon,
   type Aserradero,
   type FabricaArmas,
+  type Granja,
+  type Pozo,
   type Reino,
 } from "./construction";
 import { isReinoEra } from "./era";
@@ -83,6 +92,8 @@ export type SimulationState = {
   minasDeCarbon: MinaDeCarbon[];
   aserraderos: Aserradero[];
   minasDeHierro: MinaDeCarbon[];
+  granjas: Granja[];
+  pozos: Pozo[];
   fabricasArmas: FabricaArmas[];
   reinos: Reino[];
   cartShipments: Shipment[];
@@ -145,6 +156,8 @@ export function createInitialSimulationState(world: World): SimulationState {
     minasDeCarbon: [],
     aserraderos: [],
     minasDeHierro: [],
+    granjas: [],
+    pozos: [],
     fabricasArmas: [],
     reinos: [],
     cartShipments: [],
@@ -237,7 +250,8 @@ function processHunger(
  * la cuota y al terminar sube nivel la ciudad + chequea era. Todo con eventos
  * con budget (🚧 inicio con costo, ✅ finished, 🏛️ era).
  */
-function advanceConstruction(
+/** Exportada para tests: un turno de construcción (selección + progreso + cobro). */
+export function advanceConstruction(
   world: World,
   current: SimulationState,
   nationPolicies: Record<string, NationPolicyState>,
@@ -252,6 +266,8 @@ function advanceConstruction(
   minasDeCarbon: MinaDeCarbon[];
   aserraderos: Aserradero[];
   minasDeHierro: MinaDeCarbon[];
+  granjas: Granja[];
+  pozos: Pozo[];
   fabricasArmas: FabricaArmas[];
   reinos: Reino[];
   unmaintainedProjects: string[];
@@ -261,6 +277,8 @@ function advanceConstruction(
   const minasDeCarbon = [...current.minasDeCarbon];
   const aserraderos = [...current.aserraderos];
   let minasDeHierro = [...current.minasDeHierro];
+  const granjas = [...(current.granjas ?? [])];
+  const pozos = [...(current.pozos ?? [])];
   let fabricasArmas = [...current.fabricasArmas];
   let reinos = [...(current.reinos ?? [])];
   let nextEraState = eraState;
@@ -268,9 +286,11 @@ function advanceConstruction(
   const kindLabel: Record<ConstructionKind, string> = {
     obra: "pueblo",
     barracks: "cuartel",
+    granja: "granja",
     stable: "establo",
     mina_carbon: "mina de carbón",
     aserradero: "aserradero",
+    pozo: "pozo de agua",
     mina_hierro: "mina de hierro",
     fabrica_armas: "fábrica de armas",
     ciudad: "ciudad",
@@ -486,7 +506,7 @@ function advanceConstruction(
       return true;
     };
     const intent = ((nationPolicies[nation.id] as unknown as { constructionIntent?: string })?.constructionIntent ?? "auto") as string;
-    const chain: ConstructionKind[] = ["barracks", "stable", "obra", "mina_carbon", "aserradero", "mina_hierro", "fabrica_armas", "ciudad", "reino", "carreta"];
+    const chain: ConstructionKind[] = ["barracks", "granja", "stable", "obra", "mina_carbon", "aserradero", "pozo", "mina_hierro", "fabrica_armas", "ciudad", "reino", "carreta"];
     const orderedChain: ConstructionKind[] = intent === "pueblo" ? ["obra", ...chain.filter((k) => k !== "obra")]
       : intent === "ciudad" ? ["ciudad", ...chain.filter((k) => k !== "ciudad")]
       : intent === "reino" ? ["reino", ...chain.filter((k) => k !== "reino")]
@@ -515,6 +535,34 @@ function advanceConstruction(
       }
       if (kind === "reino" && !canReino(targetProvinceId)) {
         const target = ownedProvinces.find((p) => withCity(p) && canReino(p.id));
+        if (target) {
+          targetKind = kind;
+          targetProvinceId = target.id;
+          break;
+        }
+        continue;
+      }
+      // Mejora granja: exige 1 tile adyacente libre (1 tile/nivel, máx niv.10).
+      if (kind === "granja") {
+        const up = ownedProvinces
+          .map((p) => ({ p, elig: granjaUpgradeEligible(world, nation.id, p.id, granjas) }))
+          .find(({ elig }) => elig !== undefined);
+        if (up?.elig) {
+          targetKind = kind;
+          targetProvinceId = up.p.id;
+          break;
+        }
+      }
+      // Pozo: provincia propia con ciudad y tile libre sin veta (era antigua+).
+      if (kind === "pozo") {
+        const target = ownedProvinces.find((p) => {
+          if (!withCity(p)) return false;
+          if (projects.some((pr) => pr.nationId === nation.id && pr.provinceId === p.id && pr.kind === "pozo" && pr.status === "building")) return false;
+          const existing = pozos.find((z) => z.nationId === nation.id && z.provinceId === p.id && z.activa);
+          if (existing && (existing.nivel ?? 1) >= POZO_MAX_NIVEL) return false;
+          if (pozoUpgradeEligible(nation.id, p.id, pozos)) return true;
+          return pozoSpotEligible(world, p.id) !== undefined;
+        });
         if (target) {
           targetKind = kind;
           targetProvinceId = target.id;
@@ -622,7 +670,7 @@ function advanceConstruction(
       project.quantity = cartQuantity;
     }
     // Reserva de huella en tiles (mina 20, ciudad 15, reino 20, resto 1).
-    if (targetKind === "mina_carbon" || targetKind === "mina_hierro" || targetKind === "aserradero" || targetKind === "obra" || targetKind === "ciudad" || targetKind === "reino") {
+    if (targetKind === "mina_carbon" || targetKind === "mina_hierro" || targetKind === "aserradero" || targetKind === "granja" || targetKind === "pozo" || targetKind === "obra" || targetKind === "ciudad" || targetKind === "reino") {
       reserveTiles(targetProvinceId, BUILDING_TILE_FOOTPRINT[targetKind] ?? 1, project.id);
     }
     projects.push(project);
@@ -853,6 +901,100 @@ function advanceConstruction(
           nationIds: [done.nationId],
         });
       }
+    } else if (done.kind === "granja") {
+      const existing = granjas.find(
+        (g) => g.nationId === done.nationId && g.provinceId === done.provinceId && g.activa && (g.nivel ?? 1) < GRANJA_MAX_NIVEL,
+      );
+      if (existing) {
+        // Mejora: +1 nivel y 1 tile adyacente (1 tile/nivel).
+        const anchor = existing.x !== undefined && existing.y !== undefined
+          ? { x: existing.x, y: existing.y }
+          : (findFreeTile(done.provinceId) ?? { x: 0, y: 0 });
+        const extra = findAdjacentFreeTiles(world, anchor.x, anchor.y, done.provinceId, 1);
+        for (const s of extra) {
+          const tile = world.tiles.find((t) => t.x === s.x && t.y === s.y);
+          if (tile) tile.reservedBy = existing.id;
+        }
+        existing.nivel = (existing.nivel ?? 1) + 1;
+        existing.tiles = (existing.tiles ?? 1) + extra.length;
+        events.push({
+          id: `event-granja-upgraded-${existing.id}-${nextMonth}`,
+          month: nextMonth,
+          kind: "construction",
+          title: "🌾 Granja ampliada",
+          description: `${nation?.name ?? done.nationId} amplió su granja en ${world.provinceById.get(done.provinceId)?.name ?? done.provinceId} a nivel ${existing.nivel} (${existing.tiles} tiles): +${granjaOutput(existing.nivel)} grano/mes.`,
+          nationIds: [done.nationId],
+        });
+      } else {
+        const granjaId = `granja-${done.nationId}-${done.provinceId}-${nextMonth}`;
+        const reserved = world.tiles.find((t) => t.reservedBy === done.id);
+        const spot = reserved ?? findFreeTile(done.provinceId);
+        if (spot) {
+          const tile = world.tiles.find((t) => t.x === spot.x && t.y === spot.y);
+          if (tile) tile.reservedBy = granjaId;
+        }
+        granjas.push({
+          id: granjaId,
+          nationId: done.nationId,
+          provinceId: done.provinceId,
+          era: done.era,
+          activa: true,
+          nivel: 1,
+          x: spot?.x,
+          y: spot?.y,
+          tiles: 1,
+        });
+        events.push({
+          id: `event-granja-created-${granjaId}`,
+          month: nextMonth,
+          kind: "construction",
+          title: "🌾 Granja operativa",
+          description: `${nation?.name ?? done.nationId} puso en marcha una granja en ${world.provinceById.get(done.provinceId)?.name ?? done.provinceId} (era ${done.era}). Produce ${granjaOutput(1)} grano cada turno.`,
+          nationIds: [done.nationId],
+        });
+      }
+    } else if (done.kind === "pozo") {
+      const existing = pozos.find(
+        (p) => p.nationId === done.nationId && p.provinceId === done.provinceId && p.activa && (p.nivel ?? 1) < POZO_MAX_NIVEL,
+      );
+      if (existing) {
+        // Mejora: +1 nivel, 1 tile fijo (sin tiles extra).
+        existing.nivel = (existing.nivel ?? 1) + 1;
+        events.push({
+          id: `event-pozo-upgraded-${existing.id}-${nextMonth}`,
+          month: nextMonth,
+          kind: "construction",
+          title: "💧 Pozo ampliado",
+          description: `${nation?.name ?? done.nationId} amplió su pozo en ${world.provinceById.get(done.provinceId)?.name ?? done.provinceId} a nivel ${existing.nivel}: +${pozoOutput(existing.nivel)} agua/mes.`,
+          nationIds: [done.nationId],
+        });
+      } else {
+        const spot = pozoSpotEligible(world, done.provinceId);
+        if (spot) {
+          const pozoId = `pozo-${done.nationId}-${done.provinceId}-${nextMonth}`;
+          const tile = world.tiles.find((t) => t.x === spot.x && t.y === spot.y);
+          if (tile) tile.reservedBy = pozoId;
+          pozos.push({
+            id: pozoId,
+            nationId: done.nationId,
+            provinceId: done.provinceId,
+            era: done.era,
+            activa: true,
+            nivel: 1,
+            x: spot.x,
+            y: spot.y,
+            tiles: 1,
+          });
+          events.push({
+            id: `event-pozo-created-${pozoId}`,
+            month: nextMonth,
+            kind: "construction",
+            title: "💧 Pozo operativo",
+            description: `${nation?.name ?? done.nationId} puso en marcha un pozo en ${world.provinceById.get(done.provinceId)?.name ?? done.provinceId} (era ${done.era}). Produce ${pozoOutput(1)} agua cada turno.`,
+            nationIds: [done.nationId],
+          });
+        }
+      }
     } else if (done.kind === "mina_hierro") {
       const minaId = `mina-hierro-${done.nationId}-${done.provinceId}-${nextMonth}`;
       const reserved = world.tiles.find((t) => t.reservedBy === done.id);
@@ -953,7 +1095,7 @@ function advanceConstruction(
     reino.activo = maintenancePaidNations.has(reino.nationId);
   }
 
-  return { projects, stockpiles, eraState: nextEraState, events, minasDeCarbon, aserraderos, minasDeHierro, fabricasArmas, reinos, unmaintainedProjects: unmaintained };
+  return { projects, stockpiles, eraState: nextEraState, events, minasDeCarbon, aserraderos, minasDeHierro, granjas, pozos, fabricasArmas, reinos, unmaintainedProjects: unmaintained };
 }
 
 /** Comercio de carretas decidido por la IA según necesidad (interno + externo). */
@@ -1319,6 +1461,8 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
     minasDeCarbon: current.minasDeCarbon ?? [],
     minasDeHierro: current.minasDeHierro ?? [],
     aserraderos: current.aserraderos ?? [],
+    granjas: current.granjas ?? [],
+    pozos: current.pozos ?? [],
     reinos: current.reinos ?? [],
     projects: current.constructionProjects ?? [],
   }, nationPolicies, lang);
@@ -1342,6 +1486,8 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
   const updatedMinas = [...constructionUpdate.minasDeCarbon];
   const updatedAserraderos = [...constructionUpdate.aserraderos];
   const updatedMinasHierro = [...constructionUpdate.minasDeHierro];
+  const updatedGranjas = [...(constructionUpdate.granjas ?? [])];
+  const updatedPozos = [...(constructionUpdate.pozos ?? [])];
   const updatedFabricas = [...constructionUpdate.fabricasArmas];
   const updatedReinos = [...(constructionUpdate.reinos ?? [])];
   const updatedStockpiles = { ...constructionUpdate.stockpiles };
@@ -1380,6 +1526,34 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
   // Produce minas de hierro
   for (const mina of updatedMinasHierro) {
     produceInstallation(mina, "iron", "mina_hierro");
+  }
+
+  // Producen granjas (grano 4/nivel, mantención viva)
+  for (const granja of updatedGranjas) {
+    if (!granja.activa) continue;
+    const stock = updatedStockpiles[granja.nationId];
+    if (!stock) continue;
+    const costo = liveMaintenance.granja ?? 1;
+    if (stock.gold < costo) {
+      granja.activa = false;
+      continue;
+    }
+    stock.gold -= costo;
+    stock.resources.grain = (stock.resources.grain ?? 0) + granjaOutput(granja.nivel ?? 1);
+  }
+
+  // Producen pozos (agua 30/nivel, mantención viva)
+  for (const pozo of updatedPozos) {
+    if (!pozo.activa) continue;
+    const stock = updatedStockpiles[pozo.nationId];
+    if (!stock) continue;
+    const costo = liveMaintenance.pozo ?? 1;
+    if (stock.gold < costo) {
+      pozo.activa = false;
+      continue;
+    }
+    stock.gold -= costo;
+    stock.water = (stock.water ?? 0) + pozoOutput(pozo.nivel ?? 1);
   }
   // ================================================================
 
@@ -1457,6 +1631,8 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
     minasDeCarbon: updatedMinas,
     aserraderos: updatedAserraderos,
     minasDeHierro: updatedMinasHierro,
+    granjas: updatedGranjas,
+    pozos: updatedPozos,
     fabricasArmas: updatedFabricas,
     reinos: updatedReinos,
     cartShipments: cartUpdate.shipments,

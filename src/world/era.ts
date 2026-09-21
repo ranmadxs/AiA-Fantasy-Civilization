@@ -157,7 +157,7 @@ export const ERA_EXPLORE_DISCOUNT: Record<string, number> = {
 
 /** Construcciones desbloqueadas al llegar a cada era (acumulativo). */
 export const ERA_UNLOCKS: Record<string, string[]> = {
-  ancient: ["mina_hierro", "fabrica_armas"],
+  ancient: ["mina_hierro", "fabrica_armas", "pozo"],
   medieval: ["ciudad", "reino"],
 };
 
@@ -235,7 +235,7 @@ export function eraChangeCost(targetEra: string): number {
 /** Kinds construibles en la era dada (base siempre + desbloqueos acumulados). */
 export function eraUnlockedKinds(era: string): string[] {
   const index = eraIndex(era);
-  const unlocked = new Set<string>(["obra", "barracks", "stable", "mina_carbon", "aserradero", "carreta"]);
+  const unlocked = new Set<string>(["obra", "barracks", "granja", "stable", "mina_carbon", "aserradero", "carreta"]);
   for (let i = 1; i <= index; i += 1) {
     for (const kind of ERA_UNLOCKS[ERA_CHAIN[i]] ?? []) unlocked.add(kind);
   }

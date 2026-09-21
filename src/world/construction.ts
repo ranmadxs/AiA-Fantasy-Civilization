@@ -18,9 +18,11 @@ import { getLiveBaseCosts, getLiveMaintenanceCosts } from "./constructionConfig"
 export type ConstructionKind =
   | "obra"
   | "barracks"
+  | "granja"
   | "stable"
   | "mina_carbon"
   | "aserradero"
+  | "pozo"
   | "mina_hierro"
   | "fabrica_armas"
   | "ciudad"
@@ -184,6 +186,51 @@ export type FabricaArmas = {
   era: string;
   activa: boolean;
 };
+
+/** Granja: produce grano (4/nivel/mes). Niveles 1-10, 1 tile por nivel. */
+export type Granja = {
+  id: string;
+  nationId: string;
+  provinceId: string;
+  era: string;
+  activa: boolean;
+  nivel: number;
+  x?: number;
+  y?: number;
+  tiles?: number;
+};
+
+/** Pozo de agua: produce agua (30/nivel/mes). Niveles 1-5, 1 tile fijo. */
+export type Pozo = {
+  id: string;
+  nationId: string;
+  provinceId: string;
+  era: string;
+  activa: boolean;
+  nivel: number;
+  x?: number;
+  y?: number;
+  tiles?: number;
+};
+
+export const GRANJA_MAX_NIVEL = 10;
+export const POZO_MAX_NIVEL = 5;
+/** Grano por mes y nivel: niv.1 alimenta 1 pueblo (~400 hab × 0.01). */
+export const GRANJA_GRAIN_PER_NIVEL = 4;
+/** Agua por mes y nivel. */
+export const POZO_WATER_PER_NIVEL = 30;
+
+/** Grano mensual de una granja según nivel (1-10). */
+export function granjaOutput(nivel: number): number {
+  const n = Math.max(1, Math.min(GRANJA_MAX_NIVEL, Math.floor(nivel)));
+  return n * GRANJA_GRAIN_PER_NIVEL;
+}
+
+/** Agua mensual de un pozo según nivel (1-5). */
+export function pozoOutput(nivel: number): number {
+  const n = Math.max(1, Math.min(POZO_MAX_NIVEL, Math.floor(nivel)));
+  return n * POZO_WATER_PER_NIVEL;
+}
 
 /** Edificios terminados por provincia (para gates y buffs en war.ts/policyAI.ts). */
 export type ProvinceBuildings = Record<string, {
@@ -397,6 +444,59 @@ export function stableUpgradeEligible(
   return { stable, city, spots };
 }
 
+/** Gate mejora granja: granja activa bajo niv.10 + 1 tile adyacente libre (1 tile/nivel). */
+export function granjaUpgradeEligible(
+  world: World,
+  nationId: string,
+  provinceId: string,
+  granjas: Granja[],
+): { granja: Granja; spots: { x: number; y: number }[] } | undefined {
+  const granja = granjas.find(
+    (g) => g.nationId === nationId && g.provinceId === provinceId && g.activa && (g.nivel ?? 1) < GRANJA_MAX_NIVEL,
+  );
+  if (!granja) return undefined;
+  const anchor = granja.x !== undefined && granja.y !== undefined
+    ? { x: granja.x, y: granja.y }
+    : undefined;
+  const tiles = world.tiles.filter((t) => t.provinceId === provinceId && !t.reservedBy);
+  const origin = anchor ?? (() => {
+    const free = tiles.find((t) => !isTileOccupied(world, t.x, t.y));
+    return free ? { x: free.x, y: free.y } : undefined;
+  })();
+  if (!origin) return undefined;
+  const spots = findAdjacentFreeTiles(world, origin.x, origin.y, provinceId, 1);
+  if (spots.length < 1) return undefined;
+  return { granja, spots };
+}
+
+/** Gate mejora pozo: pozo activo bajo niv.5 (1 tile fijo, sin tiles extra). */
+export function pozoUpgradeEligible(
+  nationId: string,
+  provinceId: string,
+  pozos: Pozo[],
+): { pozo: Pozo } | undefined {
+  const pozo = pozos.find(
+    (p) => p.nationId === nationId && p.provinceId === provinceId && p.activa && (p.nivel ?? 1) < POZO_MAX_NIVEL,
+  );
+  if (!pozo) return undefined;
+  return { pozo };
+}
+
+/** Tile apto para pozo: libre, desocupado, sin veta mineral y no océano. */
+export function pozoSpotEligible(
+  world: World,
+  provinceId: string,
+): { x: number; y: number } | undefined {
+  const tiles = world.tiles.filter((t) => t.provinceId === provinceId && !t.reservedBy);
+  for (const t of tiles) {
+    if (t.resource) continue;
+    if (t.terrain === "ocean") continue;
+    if (isTileOccupied(world, t.x, t.y)) continue;
+    return { x: t.x, y: t.y };
+  }
+  return undefined;
+}
+
 /** Reino vasallo: edificio aparte, 1 por provincia, puede anexar 2da adyacente. */
 export type Reino = {
   id: string;
@@ -438,9 +538,11 @@ export type BuildingConfigRow = {
 const BUILDING_PRODUCTION: Record<ConstructionKind, string> = {
   obra: "funda pueblo niv.1 (100 colonos)",
   barracks: "14–50 reclutas/ciudad",
+  granja: "4 grano/nivel (niv.1 = 1 pueblo)",
   stable: "— (caballería, +25% vel.)",
   mina_carbon: "100 carbón",
   aserradero: "100 madera",
+  pozo: "30 agua/nivel",
   mina_hierro: "100 hierro",
   fabrica_armas: "— (×1.01 ataque)",
   ciudad: "pueblo→ciudad (+1 niv, +8% pob)",
@@ -451,9 +553,11 @@ const BUILDING_PRODUCTION: Record<ConstructionKind, string> = {
 const BUILDING_RESTRICTIONS: Record<ConstructionKind, string> = {
   obra: "origen ≥100 hab · tile libre",
   barracks: "sin cuartel no hay soldados",
+  granja: "tile libre · niv.10 máx (1 tile/nivel)",
   stable: "sin establo no hay caballería · niv.2: ciudad niv.2 + 3 tiles adyacentes",
   mina_carbon: "20 tiles",
   aserradero: "—",
+  pozo: "era antigua · tile libre sin veta",
   mina_hierro: "era antigua · 20 tiles",
   fabrica_armas: "era antigua · máx 1/provincia",
   ciudad: "era medieval · sobre pueblo",

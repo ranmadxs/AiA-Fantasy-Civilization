@@ -15,7 +15,7 @@ import {
 } from "./relationships";
 import type { NationStockpiles } from "./settlement";
 import { cartsNeededForUnits } from "./carts";
-import type { ConstructionProject, MinaDeCarbon, Aserradero, Reino, ProvinceBuildings } from "./construction";
+import type { ConstructionProject, MinaDeCarbon, Aserradero, Reino, Granja, Pozo, ProvinceBuildings } from "./construction";
 import type { Province, Resource, Terrain, Tile, World } from "./types";
 import type { SpyNetwork } from "./spies";
 import { ev, nationNameL, provinceNameL, stanceLabelL, type EventLang } from "./eventText";
@@ -96,6 +96,8 @@ export type ConquestAssets = {
   minasDeCarbon: MinaDeCarbon[];
   minasDeHierro: MinaDeCarbon[];
   aserraderos: Aserradero[];
+  granjas?: Granja[];
+  pozos?: Pozo[];
   reinos: Reino[];
   projects: ConstructionProject[];
 };
@@ -2527,6 +2529,12 @@ export function transferProvince(
       if (a.nationId === oldNationId && a.provinceId === provinceId) {
         a.nationId = newNationId;
         moved.push(a.nivel >= 3 ? ev(lang, "stable", "establo") : ev(lang, "sawmill", "aserradero"));
+      }
+    }
+    for (const g of [...(assets.granjas ?? []), ...(assets.pozos ?? [])]) {
+      if (g.nationId === oldNationId && g.provinceId === provinceId) {
+        g.nationId = newNationId;
+        moved.push(ev(lang, "farm", "granja"));
       }
     }
     if (moved.length > 0) {
