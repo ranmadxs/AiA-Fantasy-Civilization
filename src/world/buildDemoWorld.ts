@@ -652,8 +652,13 @@ function createCity(
   // Determinista por seed: mismo seed = mismas poblaciones (nunca Math.random).
   const startPercent = 0.40 + randomAt(tile.x, tile.y, seedHash + 5201) * 0.10;
   const population = Math.round(maxCapacity * startPercent);
+  const id = `city-${index}`;
+  // El tile fundador queda marcado a nombre de la ciudad (huella visible en el mapa).
+  if (!tile.reservedBy) {
+    tile.reservedBy = id;
+  }
   return {
-    id: `city-${index}`,
+    id,
     ...cityName(index, seedHash),
     nationId: nation.id,
     provinceId: province.id,

@@ -18,9 +18,9 @@ export function cityDotRadius(city: Pick<City, "tipo">): number {
 
 /** Alfa del sombreado de huella real por tipo de asentamiento. */
 export function footprintAlphaFor(kind: SettlementKind): number {
-  if (kind === "reino") return 0.28;
-  if (kind === "ciudad") return 0.2;
-  return 0.15;
+  if (kind === "reino") return 0.95;
+  if (kind === "ciudad") return 0.9;
+  return 0.88;
 }
 
 /** Tiles ocupados realmente por un dueño (ciudad o reino vía reservedBy). */

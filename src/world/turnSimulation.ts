@@ -847,6 +847,17 @@ export function advanceConstruction(
       };
       world.cities.push(founded);
       world.cityById.set(newId, founded);
+      // La huella queda a nombre de la ciudad (no del proyecto): re-sella
+      // los tiles reservados por la obra + el tile del pueblo.
+      for (const t of world.tiles) {
+        if (t.provinceId === done.provinceId && t.reservedBy === done.id) {
+          t.reservedBy = newId;
+        }
+      }
+      const homeTile = world.tiles.find((t) => t.x === spot.x && t.y === spot.y);
+      if (homeTile && !homeTile.reservedBy) {
+        homeTile.reservedBy = newId;
+      }
       if (outcome.deserters > 0) {
         const tile = world.tiles.find((t) => t.x === spot.x && t.y === spot.y);
         if (tile) tile.populationOnTile = (tile.populationOnTile ?? 0) + outcome.deserters;

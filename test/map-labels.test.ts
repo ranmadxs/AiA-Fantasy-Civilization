@@ -4,6 +4,7 @@ import {
   footprintAlphaFor,
   tilesForOwner,
 } from "../src/world/mapLabels";
+import { buildDemoWorld } from "../src/world/buildDemoWorld";
 
 describe("etiquetas y huella en mapa político", () => {
   test("etiqueta lleva nombre + Nv", () => {
@@ -17,10 +18,11 @@ describe("etiquetas y huella en mapa político", () => {
     expect(cityDotRadius({} as any)).toBe(2.6);
   });
 
-  test("alfa por tipo: reino > ciudad > pueblo", () => {
+  test("alfa por tipo: reino > ciudad > pueblo (pueblo 0.88 bien visible)", () => {
     const p = footprintAlphaFor("pueblo");
     const c = footprintAlphaFor("ciudad");
     const r = footprintAlphaFor("reino");
+    expect(p).toBe(0.88);
     expect(p).toBeLessThan(c);
     expect(c).toBeLessThan(r);
   });
@@ -34,5 +36,13 @@ describe("etiquetas y huella en mapa político", () => {
     ];
     expect(tilesForOwner(tiles, "c1")).toEqual([{ x: 0, y: 0 }, { x: 1, y: 1 - 1 }]);
     expect(tilesForOwner(tiles, "nadie")).toEqual([]);
+  });
+
+  test("worldgen: cada ciudad inicial tiene su tile marcado", () => {
+    const world = buildDemoWorld("huella-001", { nationCount: 2, cityCount: 6 });
+    for (const city of world.cities) {
+      const mine = world.tiles.filter((t: any) => t.reservedBy === city.id);
+      expect(mine.length).toBeGreaterThanOrEqual(1);
+    }
   });
 });
