@@ -95,7 +95,7 @@ export const staticZh: Record<string, string> = {
 
 export const phraseZh: Array<[RegExp, string]> = [
   [/Year (\d+), Month (\d+)/g, "第$1年 第$2月"], [/Turn (\d+)/g, "第$1回合"],
-  [/(\d+) nations · (\d+) cities/g, "$1 个国家 · $2 座城市"], [/(\d+)–(\d+) cities/g, "$1–$2 座城市"],
+  [/(\d+) nations · (\d+) cities/g, "$1 个国家 · $2 座城市"], [/(\d+) nations · (\d+) towns/g, "$1 个国家 · $2 座城镇"], [/(\d+)–(\d+) cities/g, "$1–$2 座城市"],
   [/(\d+) of (\d+) nations completed/g, "已完成 $1 / $2 个国家"], [/Waiting for /g, "正在等待"],
   [/Next in (\d+) months/g, "$1个月后重新评估"], [/(\d+) months/g, "$1个月"], [/(\d+) mo\b/g, "$1个月"],
   [/(\d+) soldiers/g, "$1名士兵"], [/(\d+) battles/g, "$1场战斗"], [/(\d+) steps/g, "$1步"],

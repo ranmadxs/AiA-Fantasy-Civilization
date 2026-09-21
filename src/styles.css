@@ -2131,6 +2131,7 @@ h2 {
 
 .resourceMark,
 .cityMark,
+.townMark,
 .freeMark,
 .nationList span,
 .nationButton span {
@@ -2150,6 +2151,14 @@ h2 {
   border-radius: 50%;
   background: #f8fbf1;
   box-shadow: 0 0 0 2px #4d8bff;
+}
+
+.townMark {
+  border-radius: 50%;
+  background: #f8fbf1;
+  box-shadow: 0 0 0 1px #9aa5b1;
+  width: 9px;
+  height: 9px;
 }
 
 .freeMark {

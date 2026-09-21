@@ -10,7 +10,7 @@ import { OfflineOverlay } from "./components/OfflineOverlay";
 import { MainMenu, DEFAULT_FREE_PROVINCE_RATIO, type NewGameSettings } from "./components/MainMenu";
 import { LanguageSelector } from "./components/LanguageSelector";
 import { NationModelConfiguration } from "./components/NationModelConfiguration";
-import { buildDemoWorld } from "./world/buildDemoWorld";
+import { buildDemoWorld, countCitiesByTipo } from "./world/buildDemoWorld";
 import { calculateCityEconomy, calculateNationCityEconomy } from "./world/cityEconomy";
 import { formatDecimal, formatInteger, formatPopulation } from "./world/formatPopulation";
 import {
@@ -786,8 +786,12 @@ export default function App() {
                     <strong>{world.nations.length}</strong>
                   </div>
                   <div>
+                    <span>Towns</span>
+                    <strong>{countCitiesByTipo(world.cities).pueblos}</strong>
+                  </div>
+                  <div>
                     <span>Cities</span>
-                    <strong>{world.cities.length}</strong>
+                    <strong>{countCitiesByTipo(world.cities).ciudades}</strong>
                   </div>
                 </div>
                 <section className="legend">
@@ -796,6 +800,7 @@ export default function App() {
                   <p><span className="line solid" /> Nation border</p>
                   <p><span className="line nationLine" /> Nation color edge</p>
                   <p><span className="resourceMark" /> Resource node</p>
+                  <p><span className="townMark" /> Towns</p>
                   <p><span className="cityMark" /> City</p>
                   <p><span className="freeMark" /> Tierra libre</p>
                 </section>
@@ -2240,7 +2245,7 @@ function CityRows({
               <em>{province ? province?.name ?? "Unknown province" : "Unknown province"}</em>
             </span>
             <b>
-              {city.isCapital ? "Capital" : `Lv ${city.level}`}
+              {city.isCapital ? "Capital" : (city.tipo ?? "pueblo") === "ciudad" ? `Ciudad Nv ${city.level}` : "Pueblo"}
               <small>{formatPopulation(city.population)}</small>
             </b>
           </>

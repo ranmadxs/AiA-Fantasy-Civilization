@@ -146,7 +146,7 @@ export function MainMenu({
 
             <div className="newGameSummary">
               <span>World Preview</span>
-              <strong>{nationCount} nations · {cityCount} cities · {Math.round(freeProvinceRatio * 100)}% free</strong>
+              <strong>{nationCount} nations · {cityCount} towns · {Math.round(freeProvinceRatio * 100)}% free</strong>
             </div>
 
             <button className="menuPrimaryButton" type="submit">

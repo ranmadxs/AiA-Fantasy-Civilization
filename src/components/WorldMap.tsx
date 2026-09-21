@@ -792,13 +792,16 @@ function drawCities(
     }
 
     if (nation) {
+      // Pueblo: punto chico; ciudad: punto grande (capital: icono aparte).
+      const radius = (city.tipo ?? "pueblo") === "ciudad" ? 3.6 : 2.6;
       graphics
-        .circle(x, y, 3.6)
+        .circle(x, y, radius)
         .fill({ color: 0xf8fbf1, alpha: 0.9 })
         .stroke({ color: nation.numericColor, width: 1.8, alpha: 0.95 });
     } else {
+      const radius = (city.tipo ?? "pueblo") === "ciudad" ? 3.6 : 2.6;
       graphics
-        .circle(x, y, 3.6)
+        .circle(x, y, radius)
         .fill({ color: 0xf8fbf1, alpha: 0.9 });
     }
     labels.addChild(createCityLabel(getLocalizedName(city, language), x + 5, y - 12, 9, 2.4));

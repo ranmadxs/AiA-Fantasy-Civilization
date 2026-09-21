@@ -331,7 +331,7 @@ const staticEs: Record<string, string> = {
 
 const phraseEs: Array<[RegExp, string]> = [
   [/Year (\d+), Month (\d+)/g, "Año $1, Mes $2"], [/Turn (\d+)/g, "Turno $1"],
-  [/(\d+) nations · (\d+) cities/g, "$1 naciones · $2 ciudades"], [/(\d+)–(\d+) cities/g, "$1–$2 ciudades"],
+  [/(\d+) nations · (\d+) cities/g, "$1 naciones · $2 ciudades"], [/(\d+) nations · (\d+) towns/g, "$1 naciones · $2 pueblos"], [/(\d+)–(\d+) cities/g, "$1–$2 ciudades"],
   [/(\d+) of (\d+) nations completed/g, "$1 de $2 naciones completadas"], [/Waiting for /g, "Esperando"],
   [/Next in (\d+) months/g, "Próximo en $1 meses"], [/(\d+) months/g, "$1 meses"], [/(\d+) mo\b/g, "$1 mes"],
   [/(\d+) soldiers/g, "$1 soldados"], [/(\d+) battles/g, "$1 batallas"], [/(\d+) steps/g, "$1 pasos"],

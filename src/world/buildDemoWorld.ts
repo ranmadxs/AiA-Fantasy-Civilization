@@ -42,8 +42,20 @@ type ProvinceSeed = {
 };
 
 /** 按种子和可选规模参数生成一个完整世界。 */
-export function buildDemoWorld(seed = defaultSeed, options: WorldGenerationOptions = {}): World {
-  const seedHash = hashString(seed);
+/** Conteo de ciudades por tipo (pueblo/ciudad) para la GUI. */
+export function countCitiesByTipo(
+  cities: Array<{ tipo?: "pueblo" | "ciudad" }>,
+): { pueblos: number; ciudades: number } {
+  let pueblos = 0;
+  let ciudades = 0;
+  for (const city of cities) {
+    if ((city.tipo ?? "pueblo") === "ciudad") ciudades += 1;
+    else pueblos += 1;
+  }
+  return { pueblos, ciudades };
+}
+
+export function buildDemoWorld(seed = defaultSeed, options: WorldGenerationOptions = {}): World {  const seedHash = hashString(seed);
   const rng = mulberry32(seedHash);
   const requestedNationCount = clampInt(options.nationCount ?? defaultNationCount, 2, 12);
   const { tiles, riverTrails } = buildTiles(seedHash);
