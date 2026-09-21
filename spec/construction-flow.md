@@ -11,10 +11,10 @@
 | 7 | Para cada tipo: verifica `isKindUnlockedByEra(kind, nationEra)` | — | ✅ | — |
 | 8 | Busca provincia con ciudad propia sin edificio completado | — | ✅ `ownedProvinces` | — |
 | 9 | Calcula costo + recursos necesarios | — | ✅ | — |
-| 10 | Si `stockpile.gold >= cost` → crea `ConstructionProject` | — | ✅ | — |
+| 10 | Si alcanza la 1ª cuota (oro **y** recursos / turnos) → crea `ConstructionProject` (`canAffordFirstQuota`) | — | ✅ | — |
 | 11 | `reserveTiles(provinceId, footprint, project.id)` — reserva tiles | — | ✅ | — |
-| 12 | Cada turno siguiente: `project.remainingTurns--` hasta 0 | — | ✅ | — |
-| 13 | Al terminar: `city.level += 1` o nueva ciudad fundada | — | ✅ | — |
+| 12 | Cada turno siguiente: cobra la cuota (`chargeConstructionTurn`); sin fondos → `stalled` + evento `⏸️`, se retoma al haber fondos | — | ✅ | — |
+| 13 | Al terminar: obra/ciudad sube nivel o funda ciudad; resto crea instalación (mina/granja/pozo/fábrica/reino) con su producción y nivel | — | ✅ | — |
 
 ## Cadena de prioridad (`orderedChain`)
 
@@ -28,12 +28,16 @@
 ## Restricciones clave
 
 - Solo 1 proyecto activo por nación a la vez
-- Cada tipo se construye una vez por provincia con ciudad
+- Cada tipo se construye una vez por provincia con ciudad (**salvo**: mejoras de nivel, carretas repetibles, obra-desarrollo)
 - Requiere `economy.policy === "construction"`
 - `barracks` y `establo` gatean unidades militares
 - `ciudad` necesita provincia con tile libre
 - `reino` requiere `isReinoEra` + 10+ nación ciudades + 2+ en provincia
-- `carreta` requiere `establo niv.3`
+- `carreta` requiere `establo niv.3` — ⚠️ **hoy inalcanzable** (tope niv.2): pendiente decidir niv.2 o implementar niv.3
+- **Mejoras**: establo→niv.2 (ciudad niv.2 + 3 tiles adyacentes), granja→niv.10 (+1 tile/nivel), pozo→niv.5 (sin tiles extra, `pozoSpotEligible`: tile libre sin veta)
+- **Caravana fundadora**: origen ≥100 hab, llegan 90-100 (muertos/desertores en viaje)
+- **Crecimiento**: +1 tile/nivel (granja) vía construcción; terminar obra sube `mapRevision` (refresca el mapa)
+- **Mantención**: minas/granjas/pozos pagan oro por turno en el loop de producción; sin pago se pausan (`activa: false`)
 
 ## Footprint de construcción (`BUILDING_TILE_FOOTPRINT`)
 
