@@ -12,7 +12,7 @@ import { LanguageSelector } from "./components/LanguageSelector";
 import { NationModelConfiguration } from "./components/NationModelConfiguration";
 import { buildDemoWorld } from "./world/buildDemoWorld";
 import { calculateCityEconomy, calculateNationCityEconomy } from "./world/cityEconomy";
-import { formatPopulation } from "./world/formatPopulation";
+import { formatDecimal, formatInteger, formatPopulation } from "./world/formatPopulation";
 import {
   evaluateDiplomaticProposalsWithEvents,
   executeDiplomacyPoliciesWithEvents,
@@ -1342,7 +1342,7 @@ function ConfigPanel({
                 {eraRows.map(row => (
                   <tr key={row.era}>
                     <td className="configRowLabel">{ERA_LABELS[row.era as keyof typeof ERA_LABELS] ?? row.label}</td>
-                    <td>{row.changeCostGold === null ? "—" : row.changeCostGold.toLocaleString("en-US")}</td>
+                    <td>{row.changeCostGold === null ? "—" : row.changeCostGold.toLocaleString("es-ES")}</td>
                     <td>×{row.costFactor}</td>
                     <td>+{row.productionBonusPct}%</td>
                     <td>{row.exploreDiscountGold} oro</td>
@@ -1385,7 +1385,7 @@ function ConfigPanel({
                         className="configInput"
                       />
                     </td>
-                    <td>{(configDensity[era] ?? 0).toLocaleString("en-US")} hab</td>
+                    <td>{(configDensity[era] ?? 0).toLocaleString("es-ES")} hab</td>
                   </tr>
                 ))}
               </tbody>
@@ -2342,17 +2342,6 @@ function formatWorldTime(elapsedMonths: number) {
   const year = Math.floor(elapsedMonths / 12) + 1;
   const month = (elapsedMonths % 12) + 1;
   return `Year ${year}, Month ${month}`;
-}
-
-function formatInteger(value: number) {
-  return new Intl.NumberFormat("en-US").format(value);
-}
-
-function formatDecimal(value: number, digits: number) {
-  return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: digits,
-  }).format(value);
 }
 
 function formatIntelResources(resources: ResourceTotals) {
