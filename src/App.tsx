@@ -627,6 +627,7 @@ export default function App() {
               language={language}
               eraState={simulation.eraState}
               nationConfigs={nationConfigs}
+              reinos={simulation.reinos}
             />
             </ErrorBoundary>
             <OfflineOverlay visible={isOffline} />
@@ -802,6 +803,8 @@ export default function App() {
                   <p><span className="resourceMark" /> Resource node</p>
                   <p><span className="townMark" /> Towns</p>
                   <p><span className="cityMark" /> City</p>
+                  <p><span className="reinoMark" /> Reino</p>
+                  <p><span className="footprintMark" /> Huella (tiles reales)</p>
                   <p><span className="freeMark" /> Tierra libre</p>
                 </section>
                 {selectedProvinceStats && (
@@ -2245,7 +2248,7 @@ function CityRows({
               <em>{province ? province?.name ?? "Unknown province" : "Unknown province"}</em>
             </span>
             <b>
-              {city.isCapital ? "Capital" : (city.tipo ?? "pueblo") === "ciudad" ? `Ciudad Nv ${city.level}` : "Pueblo"}
+              {city.isCapital ? "Capital" : (city.tipo ?? "pueblo") === "ciudad" ? `Ciudad Nv ${city.level}` : `Pueblo Nv ${city.level}`}
               <small>{formatPopulation(city.population)}</small>
             </b>
           </>

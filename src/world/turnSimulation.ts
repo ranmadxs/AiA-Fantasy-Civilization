@@ -271,6 +271,8 @@ export function advanceConstruction(
   fabricasArmas: FabricaArmas[];
   reinos: Reino[];
   unmaintainedProjects: string[];
+  /** Obras terminadas este turno (para refrescar el mapa). */
+  completedCount: number;
 } {
   const events: GameEvent[] = [];
   let projects = [...current.constructionProjects];
@@ -1109,7 +1111,7 @@ export function advanceConstruction(
     reino.activo = maintenancePaidNations.has(reino.nationId);
   }
 
-  return { projects, stockpiles, eraState: nextEraState, events, minasDeCarbon, aserraderos, minasDeHierro, granjas, pozos, fabricasArmas, reinos, unmaintainedProjects: unmaintained };
+  return { projects, stockpiles, eraState: nextEraState, events, minasDeCarbon, aserraderos, minasDeHierro, granjas, pozos, fabricasArmas, reinos, unmaintainedProjects: unmaintained, completedCount: progressed.completed.length };
 }
 
 /** Comercio de carretas decidido por la IA según necesidad (interno + externo). */
@@ -1642,7 +1644,7 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
     diplomacy: warUpdate.diplomacy,
     elapsedMonths: nextMonth,
     events: [...current.events, ...newEvents],
-    mapRevision: current.mapRevision + (warUpdate.mapChanged || movementUpdate.mapChanged || peacefulMapChanged ? 1 : 0),
+    mapRevision: current.mapRevision + (warUpdate.mapChanged || movementUpdate.mapChanged || peacefulMapChanged || constructionUpdate.completedCount > 0 ? 1 : 0),
     military: updatedMilitary,
     nationPolicies,
     nationRelations: warUpdate.relations,

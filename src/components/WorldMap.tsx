@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Application, Container, Graphics, Text, Sprite, Assets } from "pixi.js";
 import { getTileMonthlyYield } from "../world/economy";
 import { getLocalizedName, localizeResource, type Language } from "../world/localization";
+import { cityDotRadius, footprintAlphaFor, formatCityMapLabel, tilesForOwner } from "../world/mapLabels";
+import type { Reino } from "../world/construction";
 import { isNationDefeated } from "../world/nationStatus";
 import { CapitalIconResolver } from "../world/capitalIcon";
 import { ResourceService } from "../world/resourceService";
@@ -27,6 +29,7 @@ type WorldMapProps = {
   language: Language;
   eraState: Record<string, EraState>;
   nationConfigs?: NationModelConfigs;
+  reinos?: Reino[];
 };
 
 type ResourceTooltip = {
@@ -80,6 +83,7 @@ export function WorldMap({
   language,
   eraState,
   nationConfigs,
+  reinos,
 }: WorldMapProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -192,7 +196,7 @@ export function WorldMap({
       viewportRef.current = viewport;
       pixiApp.stage.addChild(viewport);
 
-      const layers = drawWorld(viewport, world, mapMode, tileByCoord, language, eraState, nationConfigs);
+      const layers = drawWorld(viewport, world, mapMode, tileByCoord, language, eraState, nationConfigs, reinos);
       nationLabelsRef.current = layers.nationLabels;
       ownershipRef.current = layers.ownership;
       nationGlowRef.current = layers.nationBorderGlow;
@@ -493,13 +497,13 @@ export function WorldMap({
     if (layers.ownership.destroyed || layers.cities.destroyed || layers.nationBorders.destroyed) {
       return;
     }
-    refreshDynamicLayers(layers, world, mapMode, language, eraState, nationConfigs);
+    refreshDynamicLayers(layers, world, mapMode, language, eraState, nationConfigs, reinos);
     neonEdgesRef.current = groupEdgesByNation(world.nationEdges);
     const inverse = 1 / Math.max(MIN_SCALE, zoom);
     for (const child of layers.nationLabels.children) {
       child.scale.set(inverse);
     }
-  }, [mapRevision, world, mapMode, language, eraState, tileByCoord]);
+  }, [mapRevision, world, mapMode, language, eraState, tileByCoord, reinos]);
 
   useEffect(() => {
     const selectedLayer = selectedLayerRef.current;
@@ -578,7 +582,8 @@ function drawWorld(
    language: Language,
    eraState: Record<string, EraState>,
    nationConfigs?: NationModelConfigs,
-): DynamicMapLayers {
+   reinos?: Reino[],
+ ): DynamicMapLayers {
   const terrain = new Graphics();
   const ownership = new Graphics();
   const resources = new Graphics();
@@ -613,7 +618,7 @@ function drawWorld(
     terrain,
   };
   drawStaticLayers(layers, world, mapMode);
-  refreshDynamicLayers(layers, world, mapMode, language, eraState, nationConfigs);
+  refreshDynamicLayers(layers, world, mapMode, language, eraState, nationConfigs, reinos);
   return layers;
 }
 
@@ -657,16 +662,17 @@ function drawStaticLayers(
 
 /** Capas que cambian cada turno: propiedad, bordes de nación, ciudades y etiquetas. */
 function refreshDynamicLayers(
-   layers: Pick<
-     DynamicMapLayers,
-     "ownership" | "nationBorderGlow" | "nationBorders" | "cities" | "cityLabels" | "nationLabels"
-   >,
-   world: World,
-   mapMode: MapMode,
-   language: Language,
-   eraState: Record<string, EraState>,
-   nationConfigs?: NationModelConfigs,
- ): void {
+  layers: Pick<
+    DynamicMapLayers,
+    "ownership" | "nationBorderGlow" | "nationBorders" | "cities" | "cityLabels" | "nationLabels"
+  >,
+  world: World,
+  mapMode: MapMode,
+  language: Language,
+  eraState: Record<string, EraState>,
+  nationConfigs?: NationModelConfigs,
+  reinos?: Reino[],
+): void {
   const { ownership, nationBorderGlow, nationBorders, cities, cityLabels, nationLabels } = layers;
   ownership.clear();
   for (const tile of world.tiles) {
@@ -705,6 +711,8 @@ function refreshDynamicLayers(
   cities.clear();
   cityLabels.removeChildren();
   if (mapMode === "political") {
+    // Huella real primero (debajo de los puntos): minas e instalaciones van en otros mapas.
+    drawFootprints(cities, world, reinos);
     drawCities(cities, cityLabels, world, language, eraState);
   }
   nationLabels.removeChildren();
@@ -744,6 +752,35 @@ function cityAtPoint(x: number, y: number, world: World) {
   }
 
   return nearestCityId;
+}
+
+/** Huella real de pueblos/ciudades/reinos en el mapa político (tiles reservedBy). */
+function drawFootprints(
+  graphics: Graphics,
+  world: World,
+  reinos: Reino[] | undefined,
+) {
+  for (const city of world.cities) {
+    const nation = world.nationById.get(city.nationId);
+    const color = nation?.numericColor ?? 0xf8fbf1;
+    const alpha = footprintAlphaFor((city.tipo ?? "pueblo") === "ciudad" ? "ciudad" : "pueblo");
+    for (const spot of tilesForOwner(world.tiles, city.id)) {
+      graphics
+        .rect(spot.x * TILE_SIZE + 1, spot.y * TILE_SIZE + 1, TILE_SIZE - 2, TILE_SIZE - 2)
+        .fill({ color, alpha });
+    }
+  }
+  for (const reino of reinos ?? []) {
+    if (!reino.activo) continue;
+    const nation = world.nationById.get(reino.nationId);
+    const color = nation?.numericColor ?? 0xffd700;
+    for (const spot of tilesForOwner(world.tiles, reino.id)) {
+      graphics
+        .rect(spot.x * TILE_SIZE + 1, spot.y * TILE_SIZE + 1, TILE_SIZE - 2, TILE_SIZE - 2)
+        .fill({ color, alpha: footprintAlphaFor("reino") })
+        .stroke({ color: 0xffd700, width: 1, alpha: 0.8 });
+    }
+  }
 }
 
 function drawCities(
@@ -787,24 +824,25 @@ function drawCities(
       } else {
         graphics.circle(x, y, 4.5).fill({ color: 0xffd700, alpha: 0.95 });
       }
-      labels.addChild(createCityLabel(getLocalizedName(city, language), x + 7, y + 5, 11, 3));
+      labels.addChild(createCityLabel(formatCityMapLabel(city, language), x + 7, y + 5, 11, 3));
       continue;
     }
 
-    if (nation) {
+    {
       // Pueblo: punto chico; ciudad: punto grande (capital: icono aparte).
-      const radius = (city.tipo ?? "pueblo") === "ciudad" ? 3.6 : 2.6;
-      graphics
-        .circle(x, y, radius)
-        .fill({ color: 0xf8fbf1, alpha: 0.9 })
-        .stroke({ color: nation.numericColor, width: 1.8, alpha: 0.95 });
-    } else {
-      const radius = (city.tipo ?? "pueblo") === "ciudad" ? 3.6 : 2.6;
-      graphics
-        .circle(x, y, radius)
-        .fill({ color: 0xf8fbf1, alpha: 0.9 });
+      const radius = cityDotRadius(city);
+      if (nation) {
+        graphics
+          .circle(x, y, radius)
+          .fill({ color: 0xf8fbf1, alpha: 0.9 })
+          .stroke({ color: nation.numericColor, width: 1.8, alpha: 0.95 });
+      } else {
+        graphics
+          .circle(x, y, radius)
+          .fill({ color: 0xf8fbf1, alpha: 0.9 });
+      }
     }
-    labels.addChild(createCityLabel(getLocalizedName(city, language), x + 5, y - 12, 9, 2.4));
+    labels.addChild(createCityLabel(formatCityMapLabel(city, language), x + 5, y - 12, 9, 2.4));
   }
 }
 

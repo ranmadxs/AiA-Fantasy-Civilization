@@ -2132,6 +2132,8 @@ h2 {
 .resourceMark,
 .cityMark,
 .townMark,
+.reinoMark,
+.footprintMark,
 .freeMark,
 .nationList span,
 .nationButton span {
@@ -2159,6 +2161,16 @@ h2 {
   box-shadow: 0 0 0 1px #9aa5b1;
   width: 9px;
   height: 9px;
+}
+
+.reinoMark {
+  border-radius: 50%;
+  background: rgb(255 215 0 / 30%);
+  box-shadow: 0 0 0 2px #ffd700;
+}
+
+.footprintMark {
+  background: rgb(248 251 241 / 25%);
 }
 
 .freeMark {
