@@ -1735,13 +1735,26 @@ export type LlmArmyOrders = {
 
 const VALID_STANCES: ArmyStance[] = ["attack", "defend", "garrison", "rally", "raid", "retreat"];
 
-/** Valida formar grupo: ciudad propia, montos sanos, dentro de lo movible sobre reserva y ≥ mínimo útil. */
+/** Valida formar grupo: ciudad propia (o provincia propia → la de mayor guarnición),
+ * montos sanos, dentro de lo movible sobre reserva y ≥ mínimo útil. */
 export function validateMusterOrder(
   world: World,
   army: NationMilitary,
   order: MusterOrder,
-): { ok: boolean; reason?: string; total?: number } {
-  const city = world.cityById.get(order.cityId);
+): { ok: boolean; reason?: string; total?: number; cityId?: string } {
+  let cityId = order.cityId;
+  let city = world.cityById.get(cityId);
+  if ((!city || city.nationId !== army.nationId) && world.provinceById.get(order.cityId)?.nationId === army.nationId) {
+    // Acepta provinceId: usa la ciudad propia con mayor guarnición (determinista).
+    const garrisonOf = (id: string) => totalUnits(army.cityGarrisons[id] ?? emptyUnits());
+    const best = world.cities
+      .filter((c) => c.provinceId === order.cityId && c.nationId === army.nationId)
+      .sort((a, b) => garrisonOf(b.id) - garrisonOf(a.id))[0];
+    if (best) {
+      cityId = best.id;
+      city = best;
+    }
+  }
   if (!city || city.nationId !== army.nationId) {
     return { ok: false, reason: "ciudad ajena o inexistente" };
   }
@@ -1761,7 +1774,7 @@ export function validateMusterOrder(
   const movable = Math.max(0, totalUnits(garrison) - cityReserveTarget(city));
   if (total > movable) return { ok: false, reason: `supera reserva (${movable} movibles)` };
   if (total < MIN_GROUP_SIZE) return { ok: false, reason: `bajo mínimo ${MIN_GROUP_SIZE}` };
-  return { ok: true, total };
+  return { ok: true, total, cityId: city.id };
 }
 
 /** Forma un grupo quieto en su ciudad con las tropas exactas pedidas. */
@@ -1774,8 +1787,8 @@ export function formGroupFromCity(
   lang?: EventLang,
 ): { army: NationMilitary; event?: GameEvent } {
   const check = validateMusterOrder(world, army, order);
-  if (!check.ok) return { army };
-  const city = world.cityById.get(order.cityId)!;
+  if (!check.ok || !check.cityId) return { army };
+  const city = world.cityById.get(check.cityId)!;
   const nextArmy = cloneArmy(army);
   const garrison = nextArmy.cityGarrisons[city.id] ?? emptyUnits();
   const take: ArmyUnits = { ...emptyUnits() };

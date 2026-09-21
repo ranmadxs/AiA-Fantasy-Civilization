@@ -425,6 +425,21 @@ export function findAdjacentFreeTiles(
   return found;
 }
 
+/** Acepta id de provincia propia o de ciudad propia y devuelve la provincia.
+ * (El LLM a veces manda cityId donde se pide provinceId: se resuelve en vez de rechazar.) */
+export function resolveProvinceRef(
+  world: World,
+  nationId: string,
+  ref: string,
+): string | undefined {
+  if (!ref) return undefined;
+  const byId = world.provinceById.get(ref);
+  if (byId && byId.nationId === nationId) return byId.id;
+  const city = world.cityById.get(ref);
+  if (city && city.nationId === nationId) return city.provinceId;
+  return undefined;
+}
+
 /** Gate mejora establo a niv.2: establo niv.1 activo + ciudad niv.2 + 3 adyacentes libres. */
 export function stableUpgradeEligible(
   world: World,

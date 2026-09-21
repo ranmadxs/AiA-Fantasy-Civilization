@@ -35,6 +35,7 @@ import {
   pozoSpotEligible,
   pozoUpgradeEligible,
   progressConstruction,
+  resolveProvinceRef,
   stableUpgrade3Eligible,
   stableUpgradeEligible,
   trasladoOutcome,
@@ -636,10 +637,13 @@ export function advanceConstruction(
 
     const validateExplicitBuild = (
       kind: ConstructionKind,
-      provinceId: string,
-    ): { ok: true; upgrade: boolean; upgradeFrom: number } | { ok: false; reason: string } => {
-      const province = ownedProvinces.find((p) => p.id === provinceId);
+      ref: string,
+    ): { ok: true; upgrade: boolean; upgradeFrom: number; provinceId: string } | { ok: false; reason: string } => {
+      // Acepta provinceId o cityId propia (el LLM a veces manda ciudad).
+      const resolvedId = resolveProvinceRef(world, nation.id, ref);
+      const province = resolvedId ? ownedProvinces.find((p) => p.id === resolvedId) : undefined;
       if (!province) return { ok: false, reason: "provincia ajena o inexistente" };
+      const provinceId = province.id;
       if (!isKindUnlockedByEra(kind, nationEra)) return { ok: false, reason: `${kind} bloqueado en era ${nationEra}` };
       if (usedProvinces.has(provinceId)) return { ok: false, reason: "provincia ocupada este turno" };
       if (projects.some((pr) => pr.nationId === nation.id && pr.provinceId === provinceId && pr.kind === kind && pr.status === "building")) {
@@ -647,15 +651,15 @@ export function advanceConstruction(
       }
       if (kind === "stable") {
         const up2 = stableUpgradeEligible(world, nation.id, provinceId, aserraderos);
-        if (up2) return { ok: true, upgrade: true, upgradeFrom: 1 };
+        if (up2) return { ok: true, provinceId, upgrade: true, upgradeFrom: 1 };
         const up3 = stableUpgrade3Eligible(world, nation.id, provinceId, aserraderos);
-        if (up3) return { ok: true, upgrade: true, upgradeFrom: 2 };
-        if (withCity(province) && !hasComplete(provinceId, "stable")) return { ok: true, upgrade: false, upgradeFrom: 1 };
+        if (up3) return { ok: true, provinceId, upgrade: true, upgradeFrom: 2 };
+        if (withCity(province) && !hasComplete(provinceId, "stable")) return { ok: true, provinceId, upgrade: false, upgradeFrom: 1 };
         return { ok: false, reason: "establo al máximo o sin sitio" };
       }
       if (kind === "pozo") {
-        if (pozoUpgradeEligible(nation.id, provinceId, pozos)) return { ok: true, upgrade: false, upgradeFrom: 1 };
-        if (withCity(province) && pozoSpotEligible(world, provinceId)) return { ok: true, upgrade: false, upgradeFrom: 1 };
+        if (pozoUpgradeEligible(nation.id, provinceId, pozos)) return { ok: true, provinceId, upgrade: false, upgradeFrom: 1 };
+        if (withCity(province) && pozoSpotEligible(world, provinceId)) return { ok: true, provinceId, upgrade: false, upgradeFrom: 1 };
         return { ok: false, reason: "pozo sin sitio" };
       }
       if (kind === "reino" && !canReino(provinceId)) return { ok: false, reason: "reino no permitido aquí" };
@@ -665,7 +669,7 @@ export function advanceConstruction(
       if ((kind === "obra" || kind === "ciudad") && !withCity(province) && !findFreeTile(provinceId)) {
         return { ok: false, reason: "sin tile libre" };
       }
-      return { ok: true, upgrade: false, upgradeFrom: 1 };
+      return { ok: true, provinceId, upgrade: false, upgradeFrom: 1 };
     };
 
     const pickChainTarget = (): { kind: ConstructionKind; provinceId: string; isStableUpgrade: boolean; upgradeFrom: number } | undefined => {
@@ -785,7 +789,7 @@ export function advanceConstruction(
         events.push(rejectedBuildOrder(explicit.provinceId, check.reason));
         continue;
       }
-      launchProject(explicit.kind, explicit.provinceId, check.upgrade, check.upgradeFrom, 0);
+      launchProject(explicit.kind, check.provinceId, check.upgrade, check.upgradeFrom, 0);
     }
     // 2) Cadena automática hasta completar cupo (máx 3, sin repetir provincia).
     while (buildingCount() < MAX_PROJECTS_PER_NATION) {
