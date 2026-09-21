@@ -884,11 +884,21 @@ export function advanceConstruction(
         developed.level += 1;
         developed.tipo = newTipo;
         developed.population = Math.round(developed.population * 1.08);
-        // Crece en tiles con el nivel: reserva la diferencia en la provincia.
+        // Crece en tiles con el nivel: reserva la diferencia PEGADA a la ciudad
+        // (si no, la huella queda dispersa e invisible). Completa con libres.
         const wanted = tilesFor(newTipo, developed.level);
         const current = developed.tiles ?? 1;
         if (wanted > current) {
-          const got = reserveTiles(developed.provinceId, wanted - current, developed.id);
+          const need = wanted - current;
+          const near = findAdjacentFreeTiles(world, developed.x, developed.y, developed.provinceId, need);
+          for (const s of near) {
+            const tile = world.tiles.find((t) => t.x === s.x && t.y === s.y);
+            if (tile) tile.reservedBy = developed.id;
+          }
+          let got = near.length;
+          if (got < need) {
+            got += reserveTiles(developed.provinceId, need - got, developed.id);
+          }
           developed.tiles = current + got;
         }
         developedLabel = `${developed.name} (nivel ${developed.level}, ${developed.tiles ?? wanted} tiles)`;
