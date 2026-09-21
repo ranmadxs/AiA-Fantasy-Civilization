@@ -6,7 +6,7 @@ import { debug } from "./debugLog";
 import { eraChangeCost, getNationEra, nextEra, checkEraRequirements } from "./era";
 import { densityPerTile, habitableTilesOf } from "./density";
 import { provinceHops } from "./carts";
-import { getFrontierProvinces } from "./diplomacy";
+import { getFrontierProvinces, isAttackableFrontier } from "./diplomacy";
 
 const llmLog = debug.tag("llmExecutor");
 
@@ -91,6 +91,7 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
           return;
         }
         decision.targetNationId = validateTarget(decision, context) ?? undefined;
+        decision.targetProvinceId = validateTargetProvince(decision, context);
         decisionMap.set(`${context.nationId}_turn_${context.turnNumber}`, decision);
         applyDecisionToWorld(decision, context);
         llmLog.info(`turno ${context.turnNumber} ${context.nationId} (aia-agent ${latencyMs}ms): expansion=${decision.expansion}, economy=${decision.economy}, diplomacy=${decision.diplomacy}, target=${decision.targetNationId ?? "null"}, rationale="${decision.rationale ?? ""}"`);
@@ -161,6 +162,7 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
         const decision = parseDecision(fullText);
         if (!decision) continue;
         decision.targetNationId = validateTarget(decision, context) ?? undefined;
+        decision.targetProvinceId = validateTargetProvince(decision, context);
         decisionMap.set(`${context.nationId}_turn_${context.turnNumber}`, decision);
         applyDecisionToWorld(decision, context);
         llmLog.info(`turno ${context.turnNumber} ${context.nationId}: expansion=${decision.expansion}, economy=${decision.economy}, diplomacy=${decision.diplomacy}, era=${decision.era ?? "stay"}, target=${decision.targetNationId ?? "null"}, rationale="${decision.rationale ?? ""}"`);
@@ -189,13 +191,42 @@ function validateTarget(decision: LLMDecision, context: NationTurnContext): stri
   return null;
 }
 
+function normalizeTargetProvince(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Valida la provincia objetivo del LLM: debe existir, ser de un enemigo
+ * en guerra con la nación y estar en la frontera. Si no, undefined y el
+ * motor elige automáticamente (misma regla para IA interna y LLM). */
+export function validateTargetProvince(
+  decision: Pick<LLMDecision, "targetNationId" | "targetProvinceId">,
+  context: Pick<NationTurnContext, "world" | "nationId" | "simulation">,
+): string | undefined {
+  const provinceId = normalizeTargetProvince(decision.targetProvinceId);
+  if (!provinceId) return undefined;
+  const province = context.world.provinceById.get(provinceId);
+  if (!province || !province.nationId || province.nationId === context.nationId) return undefined;
+  const wars = (context.simulation.diplomacy as { wars?: Array<{ attackerNationId: string; defenderNationId: string }> }).wars ?? [];
+  const enemies = new Set<string>();
+  for (const war of wars) {
+    if (war.attackerNationId === context.nationId) enemies.add(war.defenderNationId);
+    if (war.defenderNationId === context.nationId) enemies.add(war.attackerNationId);
+  }
+  if (!enemies.has(province.nationId)) return undefined;
+  if (decision.targetNationId && decision.targetNationId !== province.nationId) return undefined;
+  if (!isAttackableFrontier(context.world, context.nationId, provinceId)) return undefined;
+  return provinceId;
+}
+
 function buildPrompt(context: NationTurnContext, config: NationModelConfig): string {
   const nation = context.world.nationById.get(context.nationId);
   const stockpile = context.simulation.nationStockpiles[context.nationId];
   const policy = context.simulation.nationPolicies[context.nationId];
   const cities = context.world.cities.filter((c) => c.nationId === context.nationId);
    const provinces = context.world.provinces.filter((p) => p.nationId === context.nationId);
-    const frontierProvinces = getFrontierProvinces(context.nationId, context.world, context.simulation.diplomacy);
+    const frontierProvinces = context.world.tiles && context.simulation.diplomacy
+      ? getFrontierProvinces(context.nationId, context.world, context.simulation.diplomacy)
+      : [];
    const nationPopulation = cities.reduce((s, c) => s + c.population, 0);
 
   const eraStates = (context.simulation as any).eraState ?? {};
@@ -351,7 +382,7 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   ].join("\n");
 }
 
-function parseDecision(raw: string): LLMDecision | null {
+export function parseDecision(raw: string): LLMDecision | null {
   const cleaned = raw.replace(/```json\s*/g, "").replace(/```/g, "");
   const jsonStart = cleaned.indexOf("{");
   if (jsonStart === -1) {
@@ -383,6 +414,7 @@ function parseDecision(raw: string): LLMDecision | null {
       diplomacy: parsed.diplomacy ?? "none",
       era: parsed.era ?? "stay",
       targetNationId: parsed.targetNationId ?? null,
+      targetProvinceId: normalizeTargetProvince(parsed.targetProvinceId),
       rationale: parsed.rationale ?? "",
       cartMove: normalizeCartMove(parsed.cartMove),
       cartOffer: normalizeCartOffer(parsed.cartOffer),

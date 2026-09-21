@@ -931,6 +931,17 @@ export function getFrontierProvinces(nationId: string, world: World, diplomacy: 
   });
 }
 
-function capitalize(value: string) {
-  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+/** Objetivo atacable: provincia de otro dueño adyacente a territorio propio.
+ * (Ojo: getFrontierProvinces devuelve las propias; esto valida la enemiga.) */
+export function isAttackableFrontier(world: World, nationId: string, provinceId: string): boolean {
+  const province = world.provinceById.get(provinceId);
+  if (!province?.nationId || province.nationId === nationId) return false;
+  const adjacency = buildProvinceAdjacency(world);
+  const own = new Set(
+    world.provinces.filter((p) => p.nationId === nationId).map((p) => p.id),
+  );
+  return [...(adjacency.get(provinceId) ?? [])].some((id) => own.has(id));
+}
+
+function capitalize(value: string) {  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }

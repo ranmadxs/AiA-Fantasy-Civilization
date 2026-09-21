@@ -3,7 +3,6 @@ import { densityPerTile, habitableTilesOf } from "./density";
 import { maxLevelOf } from "./levelCaps";
 import { calculateProvinceMilitaryLimit, getAvailableArmySize, hasCitiesForArmy } from "./provinceLimits";
 import { at } from "./rngService";
-import { getFrontierProvinces } from "./diplomacy";
 import type { DiplomacyState, WarState } from "./diplomacy";
 import type { GameEvent } from "./events";
 import { isNationActive, isNationDefeated } from "./nationStatus";
@@ -1364,10 +1363,13 @@ function issueArmyCommands(
     let attackTarget;
     if (isOffensive && llmTargetProvinceId) {
       const targetProvince = world.provinceById.get(llmTargetProvinceId);
-      // Validar que la provincia pertenezca al enemigo y sea fronteriza
+      // Enemiga + adyacente a territorio propio (atacable); si no, automático.
       if (targetProvince && targetProvince.nationId === enemyNationId) {
-         const frontierProvinces = getFrontierProvinces(army.nationId, world, diplomacy);
-        if (frontierProvinces.some((fp) => fp.id === llmTargetProvinceId)) {
+        const adjacency = buildProvinceAdjacency(world);
+        const own = new Set(
+          world.provinces.filter((p) => p.nationId === army.nationId).map((p) => p.id),
+        );
+        if ([...(adjacency.get(llmTargetProvinceId) ?? [])].some((id) => own.has(id))) {
           attackTarget = targetProvince;
         }
       }
@@ -1380,6 +1382,9 @@ function issueArmyCommands(
     if (!attackTarget) {
       continue;
     }
+    const objectiveOrigin = (isOffensive && llmTargetProvinceId && attackTarget.id === llmTargetProvinceId)
+      ? "llm"
+      : "auto";
 
     const isOffensiveMove = war.attackerNationId === army.nationId || counterattack;
     const rallyProvinceId = isOffensiveMove
@@ -1419,6 +1424,8 @@ function issueArmyCommands(
       stance,
       currentMonth,
       diplomacy,
+      objectiveOrigin as "llm" | "auto",
+      lang,
     );
     nextArmy = ordered.army;
     events.push(...ordered.events);
@@ -1638,7 +1645,7 @@ function settleDeserters(world: World, nationId: string, count: number) {
   }
 }
 
-function orderArmyGroupsTowardObjective(
+export function orderArmyGroupsTowardObjective(
   world: World,
   army: NationMilitary,
   destinationProvinceId: string,
@@ -1646,6 +1653,8 @@ function orderArmyGroupsTowardObjective(
   stance: ArmyStance,
   currentMonth: number,
   diplomacy?: DiplomacyState,
+  origin?: "llm" | "auto",
+  lang?: EventLang,
 ) {
   const nextArmy = cloneArmy(army);
   const events: GameEvent[] = [];
@@ -1686,11 +1695,14 @@ function orderArmyGroupsTowardObjective(
     mapChanged = true;
     events.push(buildWarEvent({
       currentMonth,
-      description: `${nationName(world, army.nationId)} redirected an army group toward ${world.provinceById.get(destinationProvinceId)?.name ?? destinationProvinceId}.`,
+      description: ev(lang,
+        `${nationName(world, army.nationId)} redirected an army group toward ${world.provinceById.get(destinationProvinceId)?.name ?? destinationProvinceId}${origin === "llm" ? " (LLM decision)." : " (automatic)."}`,
+        `${nationNameL(world, army.nationId, lang)} redirigió un grupo de ejército hacia ${provinceNameL(world, destinationProvinceId, lang)}${origin === "llm" ? " (decisión LLM)." : " (automático)."}`),
       id: `event-army-group-ordered-${group.id}-${currentMonth}`,
       kind: "army_group_ordered",
       nationIds: [army.nationId],
-      title: "Army Group Ordered",
+      title: ev(lang, "Army Group Ordered", "Grupo de Ejército Ordenado"),
+      ...(lang ? { lang } : {}),
     }));
   }
 
