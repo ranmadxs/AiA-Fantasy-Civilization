@@ -324,6 +324,7 @@ const staticEs: Record<string, string> = {
   "The same settings and seed will generate the same starting world.": "La misma configuración y semilla generarán el mismo mundo inicial.",
   "Nation Count": "Cantidad de Naciones",
   "City Count": "Cantidad de Ciudades",
+  "Town Count": "Cantidad de Pueblos",
   "World Preview": "Vista Previa del Mundo",
   "Generate World": "Generar Mundo",
   "2–12 nations": "2–12 naciones",
@@ -331,7 +332,7 @@ const staticEs: Record<string, string> = {
 
 const phraseEs: Array<[RegExp, string]> = [
   [/Year (\d+), Month (\d+)/g, "Año $1, Mes $2"], [/Turn (\d+)/g, "Turno $1"],
-  [/(\d+) nations · (\d+) cities/g, "$1 naciones · $2 ciudades"], [/(\d+) nations · (\d+) towns/g, "$1 naciones · $2 pueblos"], [/(\d+)–(\d+) cities/g, "$1–$2 ciudades"],
+  [/(\d+) nations · (\d+) cities/g, "$1 naciones · $2 ciudades"],   [/(\d+) nations · (\d+) towns/g, "$1 naciones · $2 pueblos"], [/(\d+)–(\d+) towns/g, "$1–$2 pueblos"], [/(\d+)–(\d+) cities/g, "$1–$2 ciudades"],
   [/(\d+) of (\d+) nations completed/g, "$1 de $2 naciones completadas"], [/Waiting for /g, "Esperando"],
   [/Next in (\d+) months/g, "Próximo en $1 meses"], [/(\d+) months/g, "$1 meses"], [/(\d+) mo\b/g, "$1 mes"],
   [/(\d+) soldiers/g, "$1 soldados"], [/(\d+) battles/g, "$1 batallas"], [/(\d+) steps/g, "$1 pasos"],

@@ -89,13 +89,13 @@ export const staticZh: Record<string, string> = {
   "New World": "新世界", "Create a Civilization": "创建文明世界", "World Seed": "世界种子",
   "Enter any word or number": "输入任意文字或数字",
   "The same settings and seed will generate the same starting world.": "相同的设置与种子将生成相同的初始世界。",
-  "Nation Count": "国家数量", "City Count": "城市数量", "World Preview": "世界预览",
+  "Nation Count": "国家数量", "City Count": "城市数量", "Town Count": "城镇数量", "World Preview": "世界预览",
   "Generate World": "生成世界", "2–12 nations": "2–12 个国家",
 };
 
 export const phraseZh: Array<[RegExp, string]> = [
   [/Year (\d+), Month (\d+)/g, "第$1年 第$2月"], [/Turn (\d+)/g, "第$1回合"],
-  [/(\d+) nations · (\d+) cities/g, "$1 个国家 · $2 座城市"], [/(\d+) nations · (\d+) towns/g, "$1 个国家 · $2 座城镇"], [/(\d+)–(\d+) cities/g, "$1–$2 座城市"],
+  [/(\d+) nations · (\d+) cities/g, "$1 个国家 · $2 座城市"],   [/(\d+) nations · (\d+) towns/g, "$1 个国家 · $2 座城镇"], [/(\d+)–(\d+) towns/g, "$1–$2 座城镇"], [/(\d+)–(\d+) cities/g, "$1–$2 座城市"],
   [/(\d+) of (\d+) nations completed/g, "已完成 $1 / $2 个国家"], [/Waiting for /g, "正在等待"],
   [/Next in (\d+) months/g, "$1个月后重新评估"], [/(\d+) months/g, "$1个月"], [/(\d+) mo\b/g, "$1个月"],
   [/(\d+) soldiers/g, "$1名士兵"], [/(\d+) battles/g, "$1场战斗"], [/(\d+) steps/g, "$1步"],

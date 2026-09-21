@@ -120,7 +120,7 @@ export function MainMenu({
                 <small>2–12 nations</small>
               </label>
               <label className="newGameField">
-                <span>City Count</span>
+                <span>Town Count</span>
                 <input
                   max={100}
                   min={nationCount}
@@ -128,7 +128,7 @@ export function MainMenu({
                   type="number"
                   value={cityCount}
                 />
-                <small>{nationCount}–100 cities</small>
+                <small>{nationCount}–100 towns</small>
               </label>
               <label className="newGameField">
                 <span>Free Territory</span>
