@@ -41,6 +41,10 @@ export type Tile = {
   resource?: Resource;
   /** Habitantes sueltos en el tile (desertores, colonos). Opcional. */
   populationOnTile?: number;
+  /** Carretas perdidas en el tile (botín: las toma quien llegue primero). */
+  lostCarts?: number;
+  /** Id de construcción que reserva el tile (mina 20 tiles, ciudad/pueblo). */
+  reservedBy?: string;
 };
 
 export type City = {
@@ -57,6 +61,10 @@ export type City = {
   isCapital: boolean;
   population: number;
   level: number;
+  /** pueblo | ciudad (todas nacen pueblo niv.1). */
+  tipo?: "pueblo" | "ciudad";
+  /** Tiles ocupados (pueblo=level, ciudad=1+level). */
+  tiles?: number;
 };
 
 export type MapEdge = {

@@ -1,6 +1,7 @@
 import type { Resource } from "./types";
 import type { GameEvent } from "./events";
 import { stream, at } from "./rngService";
+import { ev, type EventLang } from "./eventText";
 
 export type MarketOffer = {
   id: string;
@@ -104,6 +105,7 @@ export function calculateTransportCost(distance: number, units: number): number 
 export function executeTransactions(
   marketState: MarketState,
   currentTurn: number,
+  lang?: EventLang,
 ): { marketState: MarketState; transactions: Transaction[]; events: GameEvent[] } {
   const executedTransactions: Transaction[] = [];
   const activeOffers = marketState.offers.filter(
@@ -143,7 +145,7 @@ export function executeTransactions(
     currentPhase: "MARKET_END",
   };
 
-  return { marketState: newMarketState, transactions: executedTransactions, events: buildMarketEvents(newMarketState, executedTransactions, expiredCount, currentTurn) };
+  return { marketState: newMarketState, transactions: executedTransactions, events: buildMarketEvents(newMarketState, executedTransactions, expiredCount, currentTurn, lang) };
 }
 
 export function buildMarketEvents(
@@ -151,6 +153,7 @@ export function buildMarketEvents(
   executed: Transaction[],
   expiredCount: number,
   currentTurn: number,
+  lang?: EventLang,
 ): GameEvent[] {
   const offeredCount = marketState.offers.filter((o) => o.validFrom === currentTurn).length;
   // Resumen agregado: máximo 1 evento/mes para no inundar el log (slice -240).
@@ -160,9 +163,12 @@ export function buildMarketEvents(
     id: `event-market-${currentTurn}`,
     month: currentTurn,
     kind: "market",
-    title: "Market Summary",
-    description: `Market: ${offeredCount} offers, ${executed.length} executed (${totalGold} gold), ${expiredCount} expired.`,
+    title: ev(lang, "Market Summary", "Resumen de Mercado"),
+    description: ev(lang,
+      `Market: ${offeredCount} offers, ${executed.length} executed (${totalGold} gold), ${expiredCount} expired.`,
+      `Mercado: ${offeredCount} ofertas, ${executed.length} ejecutadas (${totalGold} oro), ${expiredCount} expiradas.`),
     nationIds: [],
+    ...(lang ? { lang } : {}),
   }];
 }
 

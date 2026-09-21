@@ -18,4 +18,6 @@ export const PROVIDER_ENDPOINTS = {
   openrouter: "https://openrouter.ai/api/v1",
   google: "https://generativelanguage.googleapis.com/v1beta/openai",
   ollama: "http://localhost:11434/v1",
+  aia_agent: "http://localhost:4000",
+  "aia-agent": "http://localhost:4000",
 };

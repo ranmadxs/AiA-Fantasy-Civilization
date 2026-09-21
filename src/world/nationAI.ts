@@ -9,7 +9,8 @@ export function createNationAIExecutor(
   return async function nationAIExecutor(context: NationTurnContext): Promise<void> {
     const { nationId, world: ctxWorld, simulation } = context;
     const nextMonth = context.turnNumber;
-    const policy = decideNationPolicy(ctxWorld, simulation.nationRelations, simulation.nationStockpiles, nationId, nextMonth);
+    const eraStates = (simulation as any).eraState;
+    const policy = decideNationPolicy(ctxWorld, simulation.nationRelations, simulation.nationStockpiles, nationId, nextMonth, eraStates);
     (simulation as any).nationPolicies[nationId] = policy;
   };
 }

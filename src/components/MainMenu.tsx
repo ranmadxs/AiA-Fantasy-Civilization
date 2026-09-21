@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react";
+import pkg from "../../package.json";
 import type { Language } from "../world/localization";
+import { LanguageSelector } from "./LanguageSelector";
 
 /** 从主菜单创建世界时使用的参数。 */
 export type NewGameSettings = {
@@ -16,6 +18,7 @@ type MainMenuProps = {
   language: Language;
   onChangeLanguage: (language: Language) => void;
   onStartGame: (settings: NewGameSettings) => void;
+  onConfig: () => void;
 };
 
 const DEFAULT_SEED = "observer-world-001";
@@ -25,6 +28,7 @@ export function MainMenu({
   language,
   onChangeLanguage,
   onStartGame,
+  onConfig,
 }: MainMenuProps) {
   const [isCreatingWorld, setIsCreatingWorld] = useState(false);
   const [seed, setSeed] = useState(DEFAULT_SEED);
@@ -63,7 +67,7 @@ export function MainMenu({
 
       <header className="mainMenuBrand">
         <p>AI Civilization Sandbox</p>
-        <span>V0.1.0</span>
+        <span>V{pkg.version}</span>
       </header>
 
       <div className="mainMenuContent">
@@ -156,37 +160,10 @@ export function MainMenu({
               Start Game
               <span aria-hidden="true">→</span>
             </button>
-            <div className="mainMenuLanguage">
-              <span>Game Language</span>
-              <div role="group" aria-label="Game Language">
-                <button
-                  aria-pressed={language === "es"}
-                  className={language === "es" ? "active" : ""}
-                  onClick={() => onChangeLanguage("es")}
-                  type="button"
-                >
-                  🇪🇸 Español
-                </button>
-                <button
-                  aria-pressed={language === "zh"}
-                  className={language === "zh" ? "active" : ""}
-                  onClick={() => onChangeLanguage("zh")}
-                  type="button"
-                >
-                  <b aria-hidden="true">🇨🇳</b>
-                  中文
-                </button>
-                <button
-                  aria-pressed={language === "en"}
-                  className={language === "en" ? "active" : ""}
-                  onClick={() => onChangeLanguage("en")}
-                  type="button"
-                >
-                  <b aria-hidden="true">🇬🇧</b>
-                  English
-                </button>
-              </div>
-            </div>
+            <button className="menuTextButton" onClick={onConfig} type="button">
+              ⚙️ Configuración
+            </button>
+            <LanguageSelector label="Game Language" language={language} onChangeLanguage={onChangeLanguage} />
           </nav>
         )}
       </div>

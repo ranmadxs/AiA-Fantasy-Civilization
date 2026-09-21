@@ -1,5 +1,5 @@
-import { MAX_DENSITY_PER_TILE } from "./economy";
 import { CONSUMPTION_PER_PERSON } from "./hunger";
+import { densityPerTile, habitableTilesOf } from "./density";
 import type { City, Terrain, World } from "./types";
 
 export type CityEconomy = {
@@ -25,18 +25,19 @@ const BASE_GOLD_PER_LEVEL = 90;
 const CAPITAL_GOLD_BONUS = 150;
 const POPULATION_GOLD_FACTOR = 0.5;
 
-export function calculateCityEconomy(city: City, world: World): CityEconomy {
+export function calculateCityEconomy(city: City, world: World, era = "stone"): CityEconomy {
   const tile = world.tiles.find((worldTile) => worldTile.x === city.x && worldTile.y === city.y);
-  const provinceTiles = world.tiles.filter((worldTile) => worldTile.provinceId === city.provinceId);
   const terrain = tile?.terrain ?? "plain";
   const terrainDefense = terrainDefenseBonus(terrain);
   const capitalArmy = city.isCapital ? 220 : 0;
   const capitalDefense = city.isCapital ? 2 : 0;
-  const maxPopulation = provinceTiles.length * MAX_DENSITY_PER_TILE;
+  // Servicio único: solo tiles con construcción habitan.
+  // El exceso puede seguir creciendo pero la producción cae al piso 10%.
+  const maxPopulation = habitableTilesOf(city.provinceId, world) * densityPerTile(era);
   const overpopulationRatio = maxPopulation > 0
     ? Math.max(0, city.population - maxPopulation) / maxPopulation
     : 0;
-  const productionMultiplier = 1 - overpopulationRatio;
+  const productionMultiplier = Math.max(0.10, 1 - overpopulationRatio);
 
   const monthlyGold = Math.round(
     city.population * POPULATION_GOLD_FACTOR
@@ -73,10 +74,10 @@ export function calculateCityEconomy(city: City, world: World): CityEconomy {
   };
 }
 
-export function calculateNationCityEconomy(nationId: string, world: World): NationCityEconomy {
+export function calculateNationCityEconomy(nationId: string, world: World, era = "stone"): NationCityEconomy {
   const cityEconomies = world.cities
     .filter((city) => city.nationId === nationId)
-    .map((city) => calculateCityEconomy(city, world));
+    .map((city) => calculateCityEconomy(city, world, era));
 
   return cityEconomies.reduce<NationCityEconomy>(
     (total, economy) => ({

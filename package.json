@@ -1,7 +1,7 @@
 {
   "name": "ai-civilization-sandbox",
   "license": "GPL-2.0-only",
-  "version": "1.2.0",
+  "version": "2.4.5",
   "packageManager": "pnpm@9.15.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,11 @@
     "sim:003": "node scripts/init_world_003_11_09_2026.mjs",
     "sim:004": "node scripts/init_world_004_11_09_2026.mjs",
     "test": "jest",
-    "test_model": "node scripts/test_model.mjs"
+    "test_model": "node scripts/test_model.mjs",
+    "mongo:init": "node scripts/mongo-init.mjs",
+    "mongo:report": "node scripts/mongo-report.mjs",
+    "mongo:verify": "node scripts/mongo-verify.mjs",
+    "mongo:sim-smoke": "node scripts/mongo-sim-smoke.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.1",
@@ -23,6 +27,7 @@
     "delaunator": "^5.0.1",
     "dotenv": "^17.4.2",
     "lineclip": "^2.0.0",
+    "mongodb": "^7.6.0",
     "pixi.js": "^8.14.3",
     "polylabel": "^2.0.1",
     "react": "^19.2.3",

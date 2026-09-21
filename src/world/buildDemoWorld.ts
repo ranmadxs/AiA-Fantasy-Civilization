@@ -3,6 +3,7 @@ import { resourceTypes } from "./economy";
 import { cityNames, governmentForms, nationNameBases, provinceNames } from "./nameCatalog";
 import { applyBaseMapSkin } from "./mapSkin";
 import { hashString, mulberry32, randomAt } from "./rngService";
+import { densityPerTile } from "./density";
 
 const width = 192;
 const height = 128;
@@ -65,8 +66,8 @@ export function buildDemoWorld(seed = defaultSeed, options: WorldGenerationOptio
   const provinceById = new Map(provinces.map((province) => [province.id, province]));
   const nationById = new Map(nations.map((nation) => [nation.id, nation]));
   const { provinceEdges, nationEdges } = buildBorders(tiles, provinceById);
-  const cities = buildCities(tiles, provinces, nations, seedHash, options.cityCount);
-  const cityById = new Map(cities.map((city) => [city.id, city]));
+   const cities = buildCities(tiles, provinces, nations, seedHash, options.cityCount, tiles, []);
+   const cityById = new Map(cities.map((city) => [city.id, city]));
 
   return {
     seed,
@@ -280,18 +281,18 @@ function chooseCapitalProvinces(
 }
 
 function buildNations(capitals: Province[], rng: () => number): Nation[] {
-  const availableBases = shuffled(nationNameBases, rng);
   const availableForms = shuffled(governmentForms, rng);
 
   return capitals.map((capital, index) => {
-    const base = availableBases[index % availableBases.length];
     const form = availableForms[index % availableForms.length];
+    const nationId = nationIds[index];
+    const base = nationNameBases[index];
     const colors = nationColors[index % nationColors.length];
     return {
-      id: nationIds[index] ?? `nation-${index}`,
-      name: `${base.en} ${form.en}`,
-      nameEn: `${base.en} ${form.en}`,
-      nameZh: `${base.zh}${form.zh}`,
+      id: nationId,
+      name: `${form.en} de ${base.en}`,
+      nameEn: `${form.en} de ${base.en}`,
+      nameZh: `${form.zh}${base.zh}`,
       nameEs: `${form.es} de ${base.es}`,
       nameBaseId: base.id,
       governmentFormId: form.id,
@@ -471,6 +472,8 @@ function buildCities(
   nations: Nation[],
   seedHash: number,
   requestedCityCount?: number,
+  worldTiles?: Tile[],
+  worldCities?: City[],
 ): City[] {
   const tilesByProvince = new Map<string, Tile[]>();
   const provincesByNation = new Map<string, Province[]>();
@@ -512,7 +515,7 @@ function buildCities(
       seedHash,
       cityIndex,
     );
-    const capitalCity = createCity(nation, capitalProvince, capitalTile, cityIndex, true, seedHash);
+    const capitalCity = createCity(nation, capitalProvince, capitalTile, cityIndex, true, seedHash, tiles, cities);
 
     cities.push(capitalCity);
     nation.capitalCityId = capitalCity.id;
@@ -540,6 +543,8 @@ function buildCities(
           cities,
           seedHash,
           cityIndex,
+          tiles,
+          [] as City[],
         );
         remainingProvinces.splice(remainingProvinces.indexOf(province), 1);
         cityIndex += 1;
@@ -563,6 +568,8 @@ function buildCities(
         cities,
         seedHash,
         cityIndex,
+        tiles,
+        [] as City[],
       );
       remainingProvinces.splice(remainingProvinces.indexOf(province), 1);
       cityIndex += 1;
@@ -579,6 +586,8 @@ function addCityForNation(
   cities: City[],
   seedHash: number,
   cityIndex: number,
+  worldTiles: Tile[],
+  worldCities: City[],
 ): Province {
   const province = chooseCityProvince(
     remainingProvinces,
@@ -595,7 +604,7 @@ function addCityForNation(
     cityIndex,
   );
 
-  cities.push(createCity(nation, province, tile, cityIndex, false, seedHash));
+  cities.push(createCity(nation, province, tile, cityIndex, false, seedHash, worldTiles, worldCities));
   return province;
 }
 
@@ -612,16 +621,25 @@ function createCity(
   index: number,
   isCapital: boolean,
   seedHash: number,
+  worldTiles?: Tile[],
+  worldCities?: City[],
 ): City {
-  const terrainLevelBonus = tile.terrain === "plain" || tile.terrain === "coast" ? 1 : 0;
-  const resourceLevelBonus = tile.resource ? 1 : 0;
-  const level = clampInt((isCapital ? 3 : 1) + terrainLevelBonus + resourceLevelBonus, 1, 5);
-  const provinceTileCount = province.tileCount;
-  const populationBase = isCapital ? 8000 : 2000;
-  const populationNoise = 0.78 + randomAt(tile.x, tile.y, seedHash + 5200) * 0.2;
-  const maxPopulation = provinceTileCount * TILE_POP_CAP;
-  const initialPopulation = Math.round(populationBase * level * populationNoise);
-
+  // Solo tiles con construcción habitan (ciudad o reserva): el pueblo nace
+  // con su tile y crece en tiles con su nivel hasta el maxPopulation.
+  const provinceTiles = worldTiles ? worldTiles.filter((t) => t.provinceId === province.id) : [];
+  const citiesHere = (worldCities ?? []).filter((c) => c.provinceId === province.id);
+  let habitableTiles = 0;
+  for (const t of provinceTiles) {
+    if (t.reservedBy || citiesHere.some((c) => c.x === t.x && c.y === t.y)) habitableTiles += 1;
+  }
+  // El tile propio siempre cuenta (se reserva al fundar).
+  if (!provinceTiles.some((t) => t.x === tile.x && t.y === tile.y && (t.reservedBy || citiesHere.some((c) => c.x === t.x && c.y === t.y)))) {
+    habitableTiles += 1;
+  }
+  const maxCapacity = Math.max(1, habitableTiles) * densityPerTile("stone");
+  // Determinista por seed: mismo seed = mismas poblaciones (nunca Math.random).
+  const startPercent = 0.40 + randomAt(tile.x, tile.y, seedHash + 5201) * 0.10;
+  const population = Math.round(maxCapacity * startPercent);
   return {
     id: `city-${index}`,
     ...cityName(index, seedHash),
@@ -630,9 +648,24 @@ function createCity(
     x: tile.x,
     y: tile.y,
     isCapital,
-    population: Math.min(initialPopulation, maxPopulation),
-    level,
+    population,
+    level: 1,
+    tipo: "pueblo",
+    tiles: 1,
   };
+}
+
+/** Cambia la capital a cualquier ciudad (o capital de reino). 1 capital por nación. */
+export function setCapital(world: World, nationId: string, cityId: string): boolean {
+  const nation = world.nationById.get(nationId);
+  const city = world.cityById.get(cityId);
+  if (!nation || !city || city.nationId !== nationId) return false;
+  for (const c of world.cities) {
+    if (c.nationId === nationId) c.isCapital = c.id === cityId;
+  }
+  nation.capitalCityId = cityId;
+  nation.capitalProvinceId = city.provinceId;
+  return true;
 }
 
 function chooseCityProvince(

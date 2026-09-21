@@ -8,6 +8,9 @@ dist/
 .idea/
 .git/
 docs/images/
+src/**/*.png
+src/**/*.jpg
+src/**/*.svg
 *.md
 !README.md
 !docs/spec.md
@@ -16,6 +19,3 @@ Dockerfile
 .dockerignore
 docker-compose*.yml
 # tsconfig.node.json
-*.png
-*.jpg
-*.svg

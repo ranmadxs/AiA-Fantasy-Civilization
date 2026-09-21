@@ -343,6 +343,16 @@ select {
   line-height: 1;
 }
 
+/* Variante compacta sin panel para el header del juego. */
+.mainMenuLanguage.compact {
+  margin-top: 10px;
+  padding: 6px 6px 6px 10px;
+}
+
+.mainMenuLanguage.compact button {
+  min-height: 30px;
+}
+
 .newGamePanel {
   padding: 24px;
   border: 1px solid rgb(209 223 215 / 17%);
@@ -699,7 +709,7 @@ select {
 
 .modelConfigNationList button {
   display: grid;
-  grid-template-columns: 5px minmax(0, 1fr) 7px;
+  grid-template-columns: 24px minmax(0, 1fr) 7px;
   align-items: center;
   gap: 11px;
   width: 100%;
@@ -728,7 +738,15 @@ select {
   border-radius: 4px;
 }
 
-.modelConfigNationList button > span:nth-child(2) {
+.modelIcon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.modelConfigNationList button > span.textWrap {
   display: grid;
   min-width: 0;
   gap: 4px;
@@ -769,7 +787,7 @@ select {
 
 .modelConfigNationHeader {
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
   padding-bottom: 20px;
@@ -780,6 +798,12 @@ select {
   width: 8px;
   height: 50px;
   border-radius: 5px;
+}
+
+.modelConfigNationHeader > img.modelIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
 }
 
 .modelConfigNationHeader p,
@@ -941,6 +965,11 @@ select {
   color: #e68e89;
 }
 
+.modelConfigStatus .error small {
+  color: #c9a9a6;
+  font-size: 11px;
+}
+
 .modelConfigActions {
   display: flex;
   flex: 0 0 auto;
@@ -1040,7 +1069,7 @@ select {
   }
 
   .modelConfigNationHeader {
-    grid-template-columns: 8px minmax(0, 1fr);
+    grid-template-columns: 32px minmax(0, 1fr);
   }
 
   .modelEnabledControl {
@@ -1120,7 +1149,7 @@ select {
 }
 
 .eventTopTabs {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
 }
 
 .eventSubTabs {
@@ -1208,6 +1237,26 @@ select {
   border-color: rgb(74 222 128 / 45%);
 }
 
+.ingenieriaBadge {
+  display: inline-block;
+  width: fit-content;
+  padding: 1px 8px;
+  border: 1px solid rgb(212 170 98 / 50%);
+  border-radius: 20px;
+  color: #f0dfb8;
+  background: rgb(212 170 98 / 12%);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.eventRow.ingenieriaEvent {
+  border-color: rgb(212 170 98 / 50%);
+}
+
+.constructionQueue .sectionTitleRow {
+  margin-top: 4px;
+}
+
 .eventRow.logisticsEvent {
   border-color: rgb(216 157 53 / 55%);
 }
@@ -1240,7 +1289,6 @@ select {
   font-style: normal;
 }
 
-.eventNationSelector,
 .eventListSection {
   min-width: 0;
   min-height: 0;
@@ -1382,6 +1430,59 @@ select {
 
 .eventRow.levy_called {
   border-color: rgb(216 157 53 / 55%);
+}
+
+.nationChips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.nationChipGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nationChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 20px;
+  background: rgb(255 255 255 / 4%);
+  color: #dfe8e2;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.nationChip img {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+}
+
+.nationChip i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.nationChip.systemChip {
+  padding: 2px 8px;
+  color: #9fb7b1;
+}
+
+.vsSeparator {
+  color: #e8c66a;
+  font-size: 12px;
+}
+
+.vsSeparator.neutral {
+  color: #607078;
 }
 
 .victoryBanner {
@@ -1900,25 +2001,6 @@ h2 {
   margin-top: 3px;
   font-size: 12px;
   line-height: 1.35;
-}
-
-.languageControl {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-top: 10px;
-  color: #9fb7b1;
-  font-size: 12px;
-}
-
-.languageControl select {
-  flex: 1;
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid rgb(255 255 255 / 14%);
-  border-radius: 6px;
-  color: #eef3ec;
-  background: #202b30;
 }
 
 .speedControl {
@@ -2622,4 +2704,295 @@ h2 {
 
 .inspectNationButton:hover {
   background: #f1f7ef;
+}
+
+.offlineOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(20, 24, 28, 0.96);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  animation: offlineFadeIn 0.5s ease-out;
+}
+
+.offlineOverlayContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.offlineIcon {
+  font-size: 72px;
+  animation: offlinePulse 2s ease-in-out infinite;
+  display: block;
+}
+
+.offlineTitle {
+  font-size: 64px;
+  font-weight: 900;
+  color: #ef4444;
+  margin: 0;
+  letter-spacing: 8px;
+  text-shadow: 0 0 40px rgba(239, 68, 68, 0.5);
+}
+
+.offlineMessage {
+  font-size: 22px;
+  color: #d1d5db;
+  margin: 0;
+}
+
+.offlineSub {
+  font-size: 15px;
+  color: #6b7280;
+  margin: 0;
+  animation: offlineBlink 1.5s ease-in-out infinite;
+}
+
+@keyframes offlineFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes offlinePulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.1); opacity: 0.7; }
+}
+
+@keyframes offlineBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ===== CONFIG PANEL ===== */
+.configPanel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 90vw;
+  max-width: 1000px;
+  max-height: 85vh;
+  background: #1e1e24;
+  border: 2px solid #3a3a4a;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: inherit;
+}
+
+.configPanel::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: -1;
+}
+
+.configHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #3a3a4a;
+  background: #252530;
+}
+
+.configHeader h2 {
+  margin: 0;
+  font-size: 16px;
+  color: #e8e8e8;
+}
+
+.closeButton {
+  background: none;
+  border: none;
+  color: #9ca3af;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.closeButton:hover {
+  background: #374151;
+  color: #f3f4f6;
+}
+
+.configError {
+  padding: 12px 20px;
+  background: #7f1d1d;
+  color: #fecaca;
+  border-bottom: 1px solid #3a3a4a;
+  font-size: 13px;
+}
+
+.configTableWrapper {
+  flex: 1;
+  overflow: auto;
+  padding: 16px 20px;
+}
+
+.configTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.configTable th,
+.configTable td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #2d2d3a;
+}
+
+.configTable th {
+  background: #252530;
+  color: #9ca3af;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.configTable td {
+  color: #e8e8e8;
+}
+
+.configTable tr:hover td {
+  background: #2a2a38;
+}
+
+.configRowLabel {
+  min-width: 180px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.resourceTag {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-left: 6px;
+  background: #374151;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.configInput {
+  width: 100%;
+  min-width: 80px;
+  padding: 6px 10px;
+  background: #1a1a24;
+  border: 1px solid #3a3a4a;
+  border-radius: 6px;
+  color: #e8e8e8;
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.configInput:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.configInput:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.configFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 20px;
+  border-top: 1px solid #3a3a4a;
+  background: #252530;
+}
+
+.saveButton {
+  padding: 10px 20px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.saveButton:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.saveButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cancelButton {
+  padding: 10px 20px;
+  background: #374151;
+  color: #e8e8e8;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.cancelButton:hover:not(:disabled) {
+  background: #4b5563;
+}
+
+.cancelButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.aiConfigEntry {
+  width: 100%;
+  text-align: left;
+  padding: 12px 16px;
+  background: #252530;
+  border: 1px solid #3a3a4a;
+  border-radius: 8px;
+  color: #e8e8e8;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: 8px;
+}
+
+.aiConfigEntry:hover:not(:disabled) {
+  background: #2d2d3a;
+  border-color: #3b82f6;
+  color: #3b82f6;
+}
+
+.aiConfigEntry:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.aiConfigEntry small {
+  display: block;
+  color: #9ca3af;
+  font-size: 11px;
+  margin-top: 2px;
 }

@@ -1,7 +1,7 @@
 import type { GameEvent, GameEventKind } from "./events";
 
-export type TopEventTab = "resumen" | "nacion" | "guerra" | "mercado";
-export type ResumenSubTab = "todo" | "diplomacia" | "expansiones" | "espionaje";
+export type TopEventTab = "general" | "nacion" | "guerra" | "mercado";
+export type GeneralSubTab = "todo" | "diplomacia" | "expansiones" | "espionaje" | "ingenieria";
 export type GuerraSubTab = "todos" | "combate" | "logistica";
 export type MercadoSubTab = "ofertas" | "transacciones";
 
@@ -50,9 +50,11 @@ export const SPY_EVENT_KINDS: GameEventKind[] = [
 
 export const EXPANSION_EVENT_KINDS: GameEventKind[] = ["peaceful_expand"];
 
+export const INGENIERIA_EVENT_KINDS: GameEventKind[] = ["construction", "city_developed", "era"];
+
 export const MARKET_EVENT_KINDS: GameEventKind[] = ["market"];
 
-export const RESUMEN_TODO_KINDS: GameEventKind[] = ["hunger", "construction", "currency", "era", "city_developed"];
+export const GENERAL_TODO_KINDS: GameEventKind[] = ["hunger", "construction", "currency", "era", "city_developed"];
 
 export function isSpyEventKind(kind: GameEventKind): boolean {
   return (SPY_EVENT_KINDS as string[]).includes(kind);
@@ -74,14 +76,18 @@ export function isExpansionEventKind(kind: GameEventKind): boolean {
   return (EXPANSION_EVENT_KINDS as string[]).includes(kind);
 }
 
+export function isIngenieriaEventKind(kind: GameEventKind): boolean {
+  return (INGENIERIA_EVENT_KINDS as string[]).includes(kind);
+}
+
 export function getEventCacheKey(kind: GameEventKind): string | null {
   if (COMBAT_EVENT_KINDS.includes(kind)) return "guerra-combate";
   if (LOGISTICS_EVENT_KINDS.includes(kind)) return "guerra-logistica";
-  if (DIPLOMACY_EVENT_KINDS.includes(kind)) return "resumen-diplomacia";
-  if (SPY_EVENT_KINDS.includes(kind)) return "resumen-espionaje";
-  if (EXPANSION_EVENT_KINDS.includes(kind)) return "resumen-expansiones";
-  if (MARKET_EVENT_KINDS.includes(kind)) return null;
-  if (RESUMEN_TODO_KINDS.includes(kind)) return null;
+  if (DIPLOMACY_EVENT_KINDS.includes(kind)) return "general-diplomacia";
+  if (SPY_EVENT_KINDS.includes(kind)) return "general-espionaje";
+  if (EXPANSION_EVENT_KINDS.includes(kind)) return "general-expansiones";
+  if (INGENIERIA_EVENT_KINDS.includes(kind)) return "general-ingenieria";
+  if (GENERAL_TODO_KINDS.includes(kind)) return null;
   return null;
 }
 

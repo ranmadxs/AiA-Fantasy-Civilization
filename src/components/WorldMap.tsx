@@ -5,10 +5,12 @@ import { getLocalizedName, localizeResource, type Language } from "../world/loca
 import { isNationDefeated } from "../world/nationStatus";
 import { CapitalIconResolver } from "../world/capitalIcon";
 import { ResourceService } from "../world/resourceService";
+import { preloadModelIcons, createNationModelSprite } from "../world/modelIconResolver";
 import { debug } from "../world/debugLog";
 import type { MapEdge, Tile, World } from "../world/types";
 import type { ArmyGroup } from "../world/war";
 import type { EraState } from "../world/era";
+import type { NationModelConfigs } from "../world/modelConfig";
 import { applyTolkienFilter, parseTolkienLayersParam } from "../world/tolkienRenderer";
 
 export type MapMode = "political" | "terrain" | "resources";
@@ -24,6 +26,7 @@ type WorldMapProps = {
   onSelectProvince: (provinceId: string | undefined) => void;
   language: Language;
   eraState: Record<string, EraState>;
+  nationConfigs?: NationModelConfigs;
 };
 
 type ResourceTooltip = {
@@ -76,6 +79,7 @@ export function WorldMap({
   selectedProvinceId,
   language,
   eraState,
+  nationConfigs,
 }: WorldMapProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -152,10 +156,13 @@ export function WorldMap({
         background: "#132028",
         resolution: window.devicePixelRatio || 1,
       });
-      // Iconos precargados y esperados: Assets.get ya no falla por carrera.
-      await ResourceService.getInstance().preloadAll();
+// Iconos precargados y esperados: Assets.get ya no falla por carrera.
+       await ResourceService.getInstance().preloadAll();
+       if (nationConfigs) {
+         await preloadModelIcons(nationConfigs);
+       }
 
-      if (disposed) {
+       if (disposed) {
         pixiApp.destroy(true);
         return;
       }
@@ -185,7 +192,7 @@ export function WorldMap({
       viewportRef.current = viewport;
       pixiApp.stage.addChild(viewport);
 
-      const layers = drawWorld(viewport, world, mapMode, tileByCoord, language, eraState);
+      const layers = drawWorld(viewport, world, mapMode, tileByCoord, language, eraState, nationConfigs);
       nationLabelsRef.current = layers.nationLabels;
       ownershipRef.current = layers.ownership;
       nationGlowRef.current = layers.nationBorderGlow;
@@ -329,7 +336,7 @@ export function WorldMap({
       animFrame += dt;
 
       const neonLight = neonTravelLightRef.current;
-      if (!neonLight) {
+      if (!neonLight || neonLight.destroyed) {
         animFrameId = requestAnimationFrame(animate);
         return;
       }
@@ -409,11 +416,20 @@ export function WorldMap({
       window.cancelAnimationFrame(animFrameId);
       cleanupWheel?.();
       resizeObserver?.disconnect();
+      // Nulea TODAS las capas: sin esto el loop animate y los efectos
+      // corren sobre Graphics destruidos → null.clear() en Pixi.
       armyGraphicsRef.current = null;
       armyLabelsRef.current = null;
       armyPathsRef.current = null;
       selectedLayerRef.current = null;
       nationLabelsRef.current = null;
+      neonTravelLightRef.current = null;
+      neonEdgesRef.current = new Map();
+      ownershipRef.current = null;
+      nationGlowRef.current = null;
+      nationBordersRef.current = null;
+      citiesRef.current = null;
+      cityLabelsRef.current = null;
       appRef.current = null;
       viewportRef.current = null;
       if (app?.canvas.parentElement === host) {
@@ -428,6 +444,9 @@ export function WorldMap({
     const armyPaths = armyPathsRef.current;
     const armyLabels = armyLabelsRef.current;
     if (!armies || !armyPaths || !armyLabels) {
+      return;
+    }
+    if (armies.destroyed || armyPaths.destroyed || armyLabels.destroyed) {
       return;
     }
 
@@ -471,7 +490,10 @@ export function WorldMap({
     if (!layers) {
       return;
     }
-    refreshDynamicLayers(layers, world, mapMode, language, eraState);
+    if (layers.ownership.destroyed || layers.cities.destroyed || layers.nationBorders.destroyed) {
+      return;
+    }
+    refreshDynamicLayers(layers, world, mapMode, language, eraState, nationConfigs);
     neonEdgesRef.current = groupEdgesByNation(world.nationEdges);
     const inverse = 1 / Math.max(MIN_SCALE, zoom);
     for (const child of layers.nationLabels.children) {
@@ -481,7 +503,7 @@ export function WorldMap({
 
   useEffect(() => {
     const selectedLayer = selectedLayerRef.current;
-    if (!selectedLayer) {
+    if (!selectedLayer || selectedLayer.destroyed) {
       return;
     }
 
@@ -549,12 +571,13 @@ function getResourceTooltip(
 }
 
 function drawWorld(
-  container: Container,
-  world: World,
-  mapMode: MapMode,
-  tileByCoord: Map<string, Tile>,
-  language: Language,
-  eraState: Record<string, EraState>,
+   container: Container,
+   world: World,
+   mapMode: MapMode,
+   tileByCoord: Map<string, Tile>,
+   language: Language,
+   eraState: Record<string, EraState>,
+   nationConfigs?: NationModelConfigs,
 ): DynamicMapLayers {
   const terrain = new Graphics();
   const ownership = new Graphics();
@@ -590,7 +613,7 @@ function drawWorld(
     terrain,
   };
   drawStaticLayers(layers, world, mapMode);
-  refreshDynamicLayers(layers, world, mapMode, language, eraState);
+  refreshDynamicLayers(layers, world, mapMode, language, eraState, nationConfigs);
   return layers;
 }
 
@@ -634,15 +657,16 @@ function drawStaticLayers(
 
 /** Capas que cambian cada turno: propiedad, bordes de nación, ciudades y etiquetas. */
 function refreshDynamicLayers(
-  layers: Pick<
-    DynamicMapLayers,
-    "ownership" | "nationBorderGlow" | "nationBorders" | "cities" | "cityLabels" | "nationLabels"
-  >,
-  world: World,
-  mapMode: MapMode,
-  language: Language,
-  eraState: Record<string, EraState>,
-): void {
+   layers: Pick<
+     DynamicMapLayers,
+     "ownership" | "nationBorderGlow" | "nationBorders" | "cities" | "cityLabels" | "nationLabels"
+   >,
+   world: World,
+   mapMode: MapMode,
+   language: Language,
+   eraState: Record<string, EraState>,
+   nationConfigs?: NationModelConfigs,
+ ): void {
   const { ownership, nationBorderGlow, nationBorders, cities, cityLabels, nationLabels } = layers;
   ownership.clear();
   for (const tile of world.tiles) {
@@ -684,7 +708,7 @@ function refreshDynamicLayers(
     drawCities(cities, cityLabels, world, language, eraState);
   }
   nationLabels.removeChildren();
-  drawNationLabels(nationLabels, world, language, mapMode);
+  drawNationLabels(nationLabels, world, language, mapMode, nationConfigs);
 }
 
 function syncRendererSize(app: Application, host: HTMLElement, world: World) {
@@ -997,7 +1021,7 @@ function drawSelectedProvince(
   }
 }
 
-function drawNationLabels(container: Container, world: World, language: Language, mapMode: MapMode) {
+function drawNationLabels(container: Container, world: World, language: Language, mapMode: MapMode, nationConfigs?: NationModelConfigs) {
   for (const nation of world.nations) {
     const isDefeated = isNationDefeated(world, nation.id);
     const hasNoTiles = world.provinces.filter((p) => p.nationId === nation.id).length === 0;
@@ -1059,6 +1083,11 @@ function drawNationLabels(container: Container, world: World, language: Language
     if (isCentered) {
       const mapamundi = buildMapamundiLabel(world, nation, language);
       if (mapamundi) {
+        const icon = createNationModelSprite(nation.id, nationConfigs ?? {});
+        if (icon) {
+          icon.position.set(-20, -mapamundi.height / 2 - 4);
+          mapamundi.addChild(icon);
+        }
         container.addChild(mapamundi);
       }
       continue;

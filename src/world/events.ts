@@ -36,6 +36,22 @@ export type GameEventKind =
   | "currency"
   | "era";
 
+export type EventSource =
+  | "militaryEconomy"
+  | "spyUpdate"
+  | "diplomacyExecution"
+  | "diplomacyEvaluation"
+  | "warMovement"
+  | "warSystem"
+  | "peacefulExpansion"
+  | "construction"
+  | "market"
+  | "hunger"
+  | "deserters"
+  | "domination"
+  | "cartTrade"
+  | "init";
+
 export type GameEvent = {
   id: string;
   month: number;
@@ -43,7 +59,18 @@ export type GameEvent = {
   title: string;
   description: string;
   nationIds: string[];
+  source?: EventSource;
+  /** Idioma en que se generó title/description en la fuente (vía B). Ausente = inglés legacy. */
+  lang?: "en" | "es";
 };
+
+export function tagEventSource(event: GameEvent, source: EventSource): GameEvent {
+  return { ...event, source };
+}
+
+export function taggedEvents(events: GameEvent[], source: EventSource): GameEvent[] {
+  return events.map((e) => tagEventSource(e, source));
+}
 
 export function sortEventsNewestFirst(events: GameEvent[]) {
   return [...events].sort((a, b) => b.month - a.month || b.id.localeCompare(a.id));

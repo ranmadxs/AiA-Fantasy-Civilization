@@ -3,10 +3,14 @@ import type { GameEvent } from "./events";
 import type { Tile } from "./types";
 import { isNationActive } from "./nationStatus";
 import type { NationPolicies } from "./policyAI";
-import { getAdjacentTiles, calculatePeacefulExpandCost } from "./policyAI";
+import { getAdjacentTiles, calculatePeacefulExpandCost, maxExpandsFor, peacefulExpandCostFor } from "./policyAI";
+import type { ProvinceBuildings } from "./construction";
 import { buildProvinceAdjacency, rebuildNationEdges } from "./war";
+import { eraExploreDiscount, getNationEra } from "./era";
+import type { EraState } from "./era";
 import { getNationRelation, relationKey, type NationRelations } from "./relationships";
 import type { Resource, World } from "./types";
+import { ev, nationNameL, type EventLang } from "./eventText";
 
 export type WarState = {
   id: string;
@@ -617,9 +621,13 @@ export function executePeacefulExpansion(
   policies: NationPolicies,
   stockpiles: Record<string, {gold: number; water: number; resources: Record<string, number>}>,
   currentMonth: number,
+  provinceBuildings?: ProvinceBuildings,
+  eraStates?: Record<string, EraState>,
+  lang?: EventLang,
 ): { events: GameEvent[]; mapChanged: boolean } {
   const events: GameEvent[] = [];
   let mapChanged = false;
+  const adjacency = buildProvinceAdjacency(world);
   for (const [nationId, policyState] of Object.entries(policies)) {
     if (policyState.expansion.policy !== "peaceful_expand") {
       continue;
@@ -642,27 +650,51 @@ export function executePeacefulExpansion(
       continue;
     }
 
-    const tile = expandableTiles[0];
-    const province = tile.provinceId ? world.provinceById.get(tile.provinceId) : undefined;
-    if (!province || province.nationId !== undefined) continue;
-    const cost = calculatePeacefulExpandCost(tile, world);
-    if (!Number.isFinite(cost.gold) || nationStockpile.gold < cost.gold) continue;
+    // Buff de establo + escalado fase 1: cupo 2 base, 3 con 1 establo
+    // vecino, 4 con ≥2. Costo n-ésima ×(1+0.25×(n-1)). Era acumulativo.
+    const eraDiscount = eraExploreDiscount(getNationEra(nationId, eraStates ?? {}));
+    const stableProvinces = new Set(
+      world.provinces
+        .filter((p) => p.nationId === nationId && provinceBuildings?.[p.id]?.stable === true)
+        .map((p) => p.id),
+    );
+    const stableCountFor = (provinceId: string | undefined): number => {
+      const neighbors = [...(adjacency.get(provinceId ?? "") ?? [])];
+      return neighbors.filter((id) => stableProvinces.has(id)).length;
+    };
+    const turnCap = Math.max(2, ...expandableTiles.map((t) => maxExpandsFor(stableCountFor(t.provinceId))));
+    let expands = 0;
+    for (const tile of expandableTiles) {
+      if (expands >= turnCap) break;
+      const stableNeighbors = stableCountFor(tile.provinceId);
+      const fromStable = stableNeighbors >= 1;
+      const province = tile.provinceId ? world.provinceById.get(tile.provinceId) : undefined;
+      if (!province || province.nationId !== undefined) continue;
+      const baseCost = calculatePeacefulExpandCost(tile, world, fromStable, 1);
+      if (!Number.isFinite(baseCost.gold)) continue;
+      const scaledGold = peacefulExpandCostFor(expands + 1, fromStable, eraDiscount);
+      if (nationStockpile.gold < scaledGold) continue;
 
-    province.nationId = nationId;
-    nationStockpile.gold -= cost.gold;
-    rebuildNationEdges(world);
-    (world as any).mapRevision = ((world as any).mapRevision || 0) + 1;
-    mapChanged = true;
+      province.nationId = nationId;
+      nationStockpile.gold -= scaledGold;
+      rebuildNationEdges(world);
+      (world as any).mapRevision = ((world as any).mapRevision || 0) + 1;
+      mapChanged = true;
+      expands += 1;
 
-    // Sin tributo de vuelta: colonizar cuesta, no genera oro neto (fix exploit).
-    events.push({
-      month: currentMonth,
-      nationIds: [nationId],
-      kind: "peaceful_expand",
-      title: "Peaceful Expansion",
-      description: `${nationName(world, nationId)} peacefully colonized ${province.name} (neutral territory) for ${cost.gold} gold.`,
-      id: `peaceful-expand-${nationId}-${province.id}-${currentMonth}`,
-    } as any);
+      // Sin tributo de vuelta: colonizar cuesta, no genera oro neto (fix exploit).
+      events.push({
+        month: currentMonth,
+        nationIds: [nationId],
+        kind: "peaceful_expand",
+        title: ev(lang, "Peaceful Expansion", "Expansión Pacífica"),
+        description: ev(lang,
+          `${nationName(world, nationId)} peacefully colonized ${province.name} (neutral territory) for ${scaledGold} gold${fromStable ? " (establo: mitad de costo)" : ""}${eraDiscount < 1 ? ` (era: dto. ${Math.round((1 - eraDiscount) * 100)}%)` : ""}${expands > 1 ? ` (escalado ×${(1 + 0.25 * (expands - 1)).toFixed(2)})` : ""}.`,
+          `${nationNameL(world, nationId, lang)} colonizó pacíficamente ${ev(lang, province.name, province.nameEs ?? province.name)} (territorio neutral) por ${scaledGold} oro${fromStable ? " (establo: mitad de costo)" : ""}${eraDiscount < 1 ? ` (era: dto. ${Math.round((1 - eraDiscount) * 100)}%)` : ""}${expands > 1 ? ` (escalado ×${(1 + 0.25 * (expands - 1)).toFixed(2)})` : ""}.`),
+        id: `peaceful-expand-${nationId}-${province.id}-${currentMonth}`,
+        ...(lang ? { lang } : {}),
+      } as any);
+    }
   }
   return { events, mapChanged };
 }

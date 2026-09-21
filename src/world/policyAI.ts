@@ -6,6 +6,8 @@ import { getNationRelationsFor, otherNationId, type NationRelations } from "./re
 import { calculateNationMonthlyIncome, type NationStockpiles } from "./settlement";
 import type { Resource, Tile, World } from "./types";
 import { buildProvinceAdjacency } from "./war";
+import { ERA_CONFIGS, eraChangeCost, getNationEra, nextEra } from "./era";
+import type { EraState } from "./era";
 
 export const policyDecisionIntervalMonths = 2;
 
@@ -27,6 +29,7 @@ export type SpyMissionPolicy =
   | "gather_intelligence"
   | "improve_relations"
   | "sow_discord";
+export type EraPolicy = "stay" | "advance_era" | "skip_dark";
 
 export type PolicyDirection<TPolicy extends string> = {
   policy: TPolicy;
@@ -34,6 +37,8 @@ export type PolicyDirection<TPolicy extends string> = {
   rationale: string;
   targetNationId?: string;
   targetResource?: Resource;
+  decidedAtMonth?: number;
+  nextDecisionMonth?: number;
 };
 
 export type SpyMissionIntent = PolicyDirection<SpyMissionPolicy> & {
@@ -46,6 +51,8 @@ export type NationPolicyState = {
   economy: PolicyDirection<EconomyPolicy>;
   diplomacy: PolicyDirection<DiplomacyPolicy>;
   spyMissions: SpyMissionIntent[];
+  /** Cambio de era (opcional): si falta, la nación se queda. */
+  era?: PolicyDirection<EraPolicy>;
   decidedAtMonth: number;
   nextDecisionMonth: number;
 };
@@ -83,6 +90,12 @@ const spyMissionLabels: Record<SpyMissionPolicy, string> = {
   sow_discord: "Sow Discord",
 };
 
+const eraLabels: Record<EraPolicy, string> = {
+  stay: "Stay in Era",
+  advance_era: "Advance Era",
+  skip_dark: "Skip Dark Age",
+};
+
 export function buildInitialNationPolicies(
   world: World,
   relations: NationRelations,
@@ -104,6 +117,7 @@ export function advanceNationPolicies(
   currentPolicies: NationPolicies,
   fromMonth: number,
   toMonth: number,
+  eraStates?: Record<string, EraState>,
 ): NationPolicies {
   let changed = false;
   const nextPolicies = { ...currentPolicies };
@@ -115,14 +129,14 @@ export function advanceNationPolicies(
 
     const currentPolicy =
       nextPolicies[nation.id] ??
-      decideNationPolicy(world, relations, stockpiles, nation.id, fromMonth);
+      decideNationPolicy(world, relations, stockpiles, nation.id, fromMonth, eraStates);
 
     if (toMonth < currentPolicy.nextDecisionMonth) {
       nextPolicies[nation.id] = currentPolicy;
       continue;
     }
 
-    nextPolicies[nation.id] = decideNationPolicy(world, relations, stockpiles, nation.id, toMonth);
+    nextPolicies[nation.id] = decideNationPolicy(world, relations, stockpiles, nation.id, toMonth, eraStates);
     changed = true;
   }
 
@@ -135,6 +149,7 @@ export function decideNationPolicy(
   stockpiles: NationStockpiles,
   nationId: string,
   currentMonth: number,
+  eraStates?: Record<string, EraState>,
 ): NationPolicyState {
   const profile = buildNationPolicyProfile(world, relations, stockpiles, nationId);
   // Diplomacia primero: la expansión se empareja al mismo objetivo solo si hay guerra.
@@ -146,6 +161,7 @@ export function decideNationPolicy(
     economy: decideEconomy(profile),
     diplomacy,
     spyMissions: decideSpyMissions(profile),
+    era: decideEra(profile, world, stockpiles, eraStates, currentMonth),
     decidedAtMonth: currentMonth,
     nextDecisionMonth: currentMonth + policyDecisionIntervalMonths,
   };
@@ -396,6 +412,53 @@ function decideEconomy(profile: ReturnType<typeof buildNationPolicyProfile>): Po
     label: economyLabels.construction,
     rationale: `${profile.openBuildingSlots} empty building slots are available.`,
   };
+}
+
+/**
+ * Decisión de era (motor): avanzar si hay oro para el costo del cambio
+ * y ciudades suficientes para la era siguiente. Sin eraStates → stay.
+ */
+function decideEra(
+  profile: ReturnType<typeof buildNationPolicyProfile>,
+  world: World,
+  stockpiles: NationStockpiles,
+  eraStates: Record<string, EraState> | undefined,
+  currentMonth: number,
+): PolicyDirection<EraPolicy> {
+  void currentMonth;
+  const stay: PolicyDirection<EraPolicy> = {
+    policy: "stay",
+    label: eraLabels.stay,
+    rationale: "Holding current era.",
+  };
+  if (!eraStates) return stay;
+  const current = getNationEra(profile.nationId, eraStates);
+  const cities = world.cities.filter((c) => c.nationId === profile.nationId).length;
+  const gold = stockpiles[profile.nationId]?.gold ?? 0;
+  // Era oscura opcional: en medieval, si alcanza para modern directo se salta.
+  if (current === "medieval") {
+    const skipCost = eraChangeCost("modern");
+    const skipNeed = ERA_CONFIGS["modern"]?.unlockCities ?? 0;
+    if (gold >= skipCost && cities >= skipNeed) {
+      return {
+        policy: "skip_dark",
+        label: eraLabels.skip_dark,
+        rationale: `Skipping optional dark age to modern for ${skipCost} gold (${cities} cities).`,
+      };
+    }
+  }
+  const next = nextEra(current);
+  if (!next) return stay;
+  const cost = eraChangeCost(next);
+  const needCities = ERA_CONFIGS[next]?.unlockCities ?? 0;
+  if (gold >= cost && cities >= needCities) {
+    return {
+      policy: "advance_era",
+      label: eraLabels.advance_era,
+      rationale: `Advancing to ${next} for ${cost} gold (${cities} cities).`,
+    };
+  }
+  return stay;
 }
 
 function decideDiplomacy(
@@ -660,7 +723,7 @@ export function getAdjacentEnemyTiles(world: World, nationId: string, profile: R
   return enemyTiles;
 }
 
-export function calculatePeacefulExpandCost(tile: Tile, world: World): { gold: number; population: number; tribute: number; type: "neutral" | "province" } {
+export function calculatePeacefulExpandCost(tile: Tile, world: World, stableDiscount = false, eraDiscount = 1): { gold: number; population: number; tribute: number; type: "neutral" | "province" } {
   const province = world.provinces.find(p => p.id === tile.provinceId);
   const cityCount = world.cities.filter(c => c.provinceId === tile.provinceId).length;
   // Fuente única de población: las ciudades (Province no tiene campo population).
@@ -670,8 +733,10 @@ export function calculatePeacefulExpandCost(tile: Tile, world: World): { gold: n
   const isNeutral = !province || province.nationId === undefined;
 
   if (isNeutral) {
-    // Colonizar neutral cuesta 1 oro fijo, sin reembolso posterior (sin exploit).
-    return { gold: 1, population: 0, tribute: 0, type: "neutral" };
+    // Colonizar neutral cuesta 1 oro fijo (0.5 con establo adyacente),
+    // sin reembolso posterior (sin exploit). Descuento de era acumulativo.
+    const base = stableDiscount ? 0.5 : 1;
+    return { gold: Math.round(base * eraDiscount * 100) / 100, population: 0, tribute: 0, type: "neutral" };
   }
 
   // Provincias con dueño NO se pueden tomar pacíficamente (requieren guerra).
@@ -685,3 +750,20 @@ export function calculatePeacefulExpandCost(tile: Tile, world: World): { gold: n
 export function canAffordPeacefulExpand(cost: {gold: number; population: number; tribute: number; type: string}, stockpile: {gold: number; resources: Record<string, number>}): boolean {
   return stockpile.gold >= cost.gold;
 }
+
+/** Cupo de anexiones por turno: 2 base, 3 con 1 establo vecino, 4 con ≥2. */
+export function maxExpandsFor(stableNeighbors: number): number {
+  if (stableNeighbors >= 2) return 4;
+  if (stableNeighbors >= 1) return 3;
+  return 2;
+}
+
+/** Costo escalado n-ésima anexión del turno: base × (1 + 0.25×(n-1)). */
+export function peacefulExpandCostFor(nth: number, stableDiscount = false, eraDiscount = 1): number {
+  const base = stableDiscount ? 0.5 : 1;
+  const scaled = base * (1 + 0.25 * (Math.max(1, nth) - 1));
+  return Math.round(scaled * eraDiscount * 100) / 100;
+}
+
+/** Intención de construcción que la IA/LLM puede decidir (fase 1). */
+export type ConstructionIntent = "pueblo" | "ciudad" | "reino" | "auto";

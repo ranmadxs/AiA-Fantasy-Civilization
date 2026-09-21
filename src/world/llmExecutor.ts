@@ -1,17 +1,26 @@
 import type { NationTurnContext, NationTurnExecutor } from "./turnSimulation";
 import type { NationModelConfig, NationModelConfigs } from "./modelConfig";
+import { fetchOllama, normalizeChatEndpointUrl, providerPresetFor } from "./modelConfig";
+import { runAiaAgentTurn } from "./aiaAgentClient";
+import { debug } from "./debugLog";
+import { eraChangeCost, getNationEra, nextEra } from "./era";
+import { densityPerTile, habitableTilesOf } from "./density";
+import { provinceHops } from "./carts";
+
+const llmLog = debug.tag("llmExecutor");
 
 const LLM_TIMEOUT = 120_000;
 const RETRY_DELAY_MS = 2000;
 const MAX_RETRIES = 3;
 
-export type LLMProvider = "ollama" | "openrouter" | "google" | "nvidia";
+export type LLMProvider = "ollama" | "openrouter" | "google" | "nvidia" | "aia-agent";
 
 const PROVIDER_BASE_URL: Record<LLMProvider, string> = {
   ollama: "http://localhost:11434/v1",
   openrouter: "https://openrouter.ai/api/v1",
   google: "https://generativelanguage.googleapis.com/v1beta/openai",
   nvidia: "https://integrate.api.nvidia.com/v1",
+  "aia-agent": "http://localhost:4000",
 };
 
 export const DEFAULT_PROVIDER = "openrouter";
@@ -21,9 +30,15 @@ export type LLMDecision = {
   expansion: string;
   economy: string;
   diplomacy: string;
+  era?: string;
   targetNationId?: string;
   targetTileId?: string;
   rationale?: string;
+  cartMove?: { fromProvinceId: string; toProvinceId: string; carts: number };
+  cartOffer?: { targetNationId: string; carts: number; pricePerCart: number };
+  acceptCartOfferId?: string;
+  traslado?: { fromCityId: string; toCityId: string; colonos: number };
+  doctrina?: { ejecutarPct: number };
 };
 
 const decisionMap = new Map<string, LLMDecision>();
@@ -32,22 +47,62 @@ export function getDecisionLog(): Map<string, LLMDecision> {
   return decisionMap;
 }
 
+/** Normaliza el endpoint: si ya es URL completa de chat/completions se usa tal cual. */
+export const normalizeChatEndpoint = normalizeChatEndpointUrl;
+
+function logExecutorError(nationId: string, turnNumber: number, cause: string) {
+  llmLog.error(`nación ${nationId} turno ${turnNumber}: ${cause} (la nación no actúa este turno)`);
+}
+
 export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecutor {
   return async function llmExecutor(context: NationTurnContext): Promise<void> {
     const config = configs[context.nationId];
     if (!config?.enabled) return;
 
-    const baseUrl = config.endpoint || PROVIDER_BASE_URL[config.providerName as LLMProvider] || PROVIDER_BASE_URL.ollama;
-    const model = config.model || "qwen3:14B";
+    const model = (config.model || "").trim();
+    const modelRef = model;
+    if (!modelRef) {
+      logExecutorError(context.nationId, context.turnNumber, "sin modelo configurado");
+      return;
+    }
 
-    console.log("LLM Call debug:", { baseUrl, model, provider: config.providerName });
+    const baseUrl = config.endpoint || PROVIDER_BASE_URL[config.providerName as LLMProvider] || PROVIDER_BASE_URL.ollama;
+    const chatUrl = normalizeChatEndpoint(baseUrl);
+    const doFetch = providerPresetFor(config.providerName).id === "ollama" ? fetchOllama : fetch;
+
+    llmLog.info("llamada:", { chatUrl, model: modelRef, provider: config.providerName });
 
     const prompt = buildPrompt(context, config);
 
-    for (let attempt = 1; attempt <= MAX_RETRIES * 2; attempt += 1) {
+    if (providerPresetFor(config.providerName).id === "aia-agent") {
+      try {
+        const { reply, latencyMs } = await runAiaAgentTurn({
+          endpoint: config.endpoint || "http://localhost:4000",
+          model: modelRef,
+          system: `${config.personalityPrompt}\nRespond ONLY with valid JSON, no explanation.`,
+          text: prompt,
+          timeoutMs: LLM_TIMEOUT,
+        });
+        const decision = parseDecision(reply);
+        if (!decision) {
+          logExecutorError(context.nationId, context.turnNumber, "respuesta sin JSON válido");
+          return;
+        }
+        decision.targetNationId = validateTarget(decision, context) ?? undefined;
+        decisionMap.set(`${context.nationId}_turn_${context.turnNumber}`, decision);
+        applyDecisionToWorld(decision, context);
+        llmLog.info(`turno ${context.turnNumber} ${context.nationId} (aia-agent ${latencyMs}ms): expansion=${decision.expansion}, economy=${decision.economy}, diplomacy=${decision.diplomacy}, target=${decision.targetNationId ?? "null"}, rationale="${decision.rationale ?? ""}"`);
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error);
+        logExecutorError(context.nationId, context.turnNumber, cause);
+      }
+      return;
+    }
+
+    for (let attempt = 1, proxy502Retried = false; attempt <= MAX_RETRIES * 2; attempt += 1) {
       try {
         const forceJsonOnly = attempt > 1;
-        const response = await fetch(`${baseUrl}/chat/completions`, {
+        const response = await doFetch(chatUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -56,7 +111,7 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
               : {}),
           },
           body: JSON.stringify({
-            model,
+            model: modelRef,
             messages: [
               { role: "system", content: forceJsonOnly
                 ? `${config.personalityPrompt}\nReturn ONLY valid JSON. No text, no reasoning, no explanation.`
@@ -68,7 +123,8 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
               },
             ],
             max_tokens: 1024,
-            temperature: 0.7,
+            temperature: 0.5,
+            thinking: false,
           }),
           signal: AbortSignal.timeout(LLM_TIMEOUT),
         });
@@ -77,6 +133,19 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
           const waitMs = RETRY_DELAY_MS * attempt;
           await new Promise((r) => setTimeout(r, waitMs));
           continue;
+        }
+        // 502 del proxy = upstream caído: 1 reintento a los 3s.
+        // Si sigue caído, salta el turno pero NUNCA cambia el modelo.
+        // El siguiente turno vuelve a intentar con el mismo modelo original.
+        if (response.status === 502 && !proxy502Retried) {
+          proxy502Retried = true;
+          llmLog.warn(`turno ${context.turnNumber} ${context.nationId}: proxy 502, reintento en 3s`);
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+        if (response.status === 502) {
+          logExecutorError(context.nationId, context.turnNumber, "proxy 502 tras reintento, salta turno (modelo sin cambiar: " + modelRef + ")");
+          return;
         }
         if (!response.ok) {
           throw new Error(`LLM request failed: ${response.status} ${response.statusText}`);
@@ -89,17 +158,21 @@ export function createLLMExecutor(configs: NationModelConfigs): NationTurnExecut
         if (!fullText.trim()) throw new Error("Empty response from LLM");
         const decision = parseDecision(fullText);
         if (!decision) continue;
-        const target = validateTarget(decision, context);
-        if (target) { decision.targetNationId = target; }
+        decision.targetNationId = validateTarget(decision, context) ?? undefined;
         decisionMap.set(`${context.nationId}_turn_${context.turnNumber}`, decision);
         applyDecisionToWorld(decision, context);
-        console.log(`[${context.nationId}] Turn ${context.turnNumber}: expansion=${decision.expansion}, economy=${decision.economy}, diplomacy=${decision.diplomacy}, target=${decision.targetNationId ?? "null"}, rationale="${decision.rationale ?? ""}"`);
+        llmLog.info(`turno ${context.turnNumber} ${context.nationId}: expansion=${decision.expansion}, economy=${decision.economy}, diplomacy=${decision.diplomacy}, era=${decision.era ?? "stay"}, target=${decision.targetNationId ?? "null"}, rationale="${decision.rationale ?? ""}"`);
         return;
       } catch (error) {
-        if (attempt === MAX_RETRIES * 2) throw error;
+        if (attempt === MAX_RETRIES * 2) {
+          const cause = error instanceof Error ? error.message : String(error);
+          logExecutorError(context.nationId, context.turnNumber, cause);
+          return;
+        }
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
       }
     }
+    logExecutorError(context.nationId, context.turnNumber, "sin decisión válida tras reintentos");
   };
 }
 
@@ -122,7 +195,15 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   const provinces = context.world.provinces.filter((p) => p.nationId === context.nationId);
   const nationPopulation = cities.reduce((s, c) => s + c.population, 0);
 
-    const enemyNations = context.world.nations
+  const eraStates = (context.simulation as any).eraState ?? {};
+  const currentEra = getNationEra(context.nationId, eraStates);
+  const upcomingEra = nextEra(currentEra);
+  const eraCost = upcomingEra ? eraChangeCost(upcomingEra) : 0;
+  const skipInfo = currentEra === "medieval"
+    ? ` Or skip_dark to jump the optional dark age straight to modern for ${eraChangeCost("modern")} gold.`
+    : "";
+
+  const enemyNations = context.world.nations
     .filter((n) => n.id !== context.nationId)
     .map((n) => {
       const nCities = context.world.cities.filter((c) => c.nationId === n.id);
@@ -133,39 +214,120 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
 
   const allNationIds = context.world.nations.map((n) => `${n.id}="${n.name}"`).join(", ");
 
+  const neutralProvinces = context.world.provinces.filter((p) => !p.nationId);
+  const neutralInfo = neutralProvinces.length > 0
+    ? neutralProvinces.map((p) => `${p.id} (${p.name}, ${p.tileCount} tiles)`).join(", ")
+    : "none";
+
+  const simAny = context.simulation as any;
+  const myStables: Array<{ provinceId: string; carts: number }> = (simAny.aserraderos ?? [])
+    .filter((a: any) => a.nationId === context.nationId && a.activa)
+    .map((a: any) => ({ provinceId: a.provinceId, carts: a.carts ?? 0 }));
+  const myGroups: Array<{ provinceId: string; foot: number; carts: number }> = ((simAny.military?.[context.nationId]?.armyGroups ?? []) as any[])
+    .map((g: any) => ({
+      provinceId: g.locationProvinceId,
+      foot: (g.units?.militia ?? 0) + (g.units?.infantry ?? 0) + (g.units?.levy ?? 0),
+      carts: g.carts ?? 0,
+    }));
+  const cartNeedByProvince: Record<string, number> = {};
+  for (const g of myGroups) {
+    cartNeedByProvince[g.provinceId] = (cartNeedByProvince[g.provinceId] ?? 0) + Math.max(0, Math.ceil(g.foot / 50) - g.carts);
+  }
+  const cartStatus = myStables.length === 0
+    ? "no lvl.3 stables (build stable upgrades first)"
+    : myStables.map((s) => `${s.provinceId}: pool ${s.carts}, need ${cartNeedByProvince[s.provinceId] ?? 0}`).join("; ");
+  const incomingOffers = ((simAny.cartOffers ?? []) as any[])
+    .filter((o: any) => o.targetNationId === context.nationId)
+    .map((o: any) => `${o.id} (from ${o.sellerNationId}: ${o.carts} carts @ ${o.pricePerCart} gold each)`)
+    .join("; ") || "none";
+
+  // Sobrepoblación por ciudad: quedarse sobre el tope baja la producción
+  // (piso 10%). La IA decide si trasladar ponderando estos números.
+  const cityRows = cities.map((c) => {
+    const cap = habitableTilesOf(c.provinceId, context.world) * densityPerTile(currentEra);
+    const ratio = cap > 0 ? c.population / cap : 0;
+    const prod = Math.max(10, Math.round((1 - Math.max(0, ratio - 1)) * 100));
+    return { c, cap, ratio, prod };
+  });
+  const cityStatus = cityRows
+    .map((r) => `${r.c.id} (${r.c.name}: ${r.c.population}/${r.cap} hab, prod ${r.prod}%)`)
+    .join("; ");
+  const overRows = cityRows.filter((r) => r.ratio > 1.1).sort((a, b) => b.ratio - a.ratio).slice(0, 3);
+  const moveOptions = overRows.length === 0 ? "none overpopulated" : overRows.map((r) => {
+    const dests = cityRows
+      .filter((d) => d.c.id !== r.c.id && d.c.population < d.cap)
+      .map((d) => ({ d, hops: provinceHops(context.world, r.c.provinceId, d.c.provinceId) }))
+      .filter((x) => Number.isFinite(x.hops))
+      .sort((a, b) => a.hops - b.hops || (b.d.cap - b.d.c.population) - (a.d.cap - a.d.c.population))
+      .slice(0, 2)
+      .map((x) => `${x.d.c.id} (${x.hops} tramos, ${x.hops} oro)`)
+      .join(" or ");
+    return `${r.c.id} → ${dests || "no room"}`;
+  }).join("; ");
+
   return [
     `You are the national decision maker of ${nation?.name ?? context.nationId} (id=${context.nationId}).`,
     `Turn: ${context.turnNumber}`,
-    `Your status: Population=${nationPopulation.toLocaleString()} | Cities=${cities.length} | Provinces=${provinces.length} | Gold=${Math.round(stockpile?.gold ?? 0)}`,
+    `Your status: Population=${nationPopulation.toLocaleString()} | Cities=${cities.length} | Provinces=${provinces.length} | Gold=${Math.round(stockpile?.gold ?? 0)} | Era=${currentEra}${upcomingEra ? ` (next: ${upcomingEra} for ${eraCost} gold)` : " (máxima)"}`,
+    ``,
+    `Neutral territories available (${neutralProvinces.length} total): ${neutralInfo}`,
+    `Peaceful expansion (peaceful_expand) costs only 1 gold per new city and never starts wars.`,
     ``,
     `All nation IDs: ${allNationIds}`,
     ``,
     `Other nations:` + (enemyNations ? "\n    " + enemyNations : " none"),
     ``,
     `DECISION GUIDE — what each option does:`,
-    `  expansion:"control_city" + targetNationId: ATTACK that nation and CAPTURE one of its cities.`,
-    `    You steal the city, its population, and its resources. Use this to grow when you are weak.`,
-    `  expansion:"control_resource" + targetNationId: Seize resource tiles from that nation.`,
-    `  expansion:"decisive_battle" + targetNationId: Launch a full-scale invasion.`,
-    `  expansion:"peaceful_expand": Colonize NEUTRAL territory by paying gold (no target needed, never steals enemy land). No war needed.`,
+    ``,
+    `  **PRIORITY RULE: If you have gold >= 1 and neutral provinces are available, choose peaceful_expand first. This is the safest way to grow.**`,
+    ``,
+    `  expansion:"peaceful_expand": Colonize NEUTRAL territory by paying 1 gold. No target needed, never steals enemy land, never starts war. Choose this if you have gold and neutral tiles are nearby.`,
+    `  expansion:"control_city" + targetNationId: ATTACK that nation and CAPTURE one of its cities. You steal the city, its population, and its resources. Use this only when at war or when no neutral territory is available.`,
+    `  expansion:"control_resource" + targetNationId: Seize resource tiles from that nation. Only when at war.`,
+    `  expansion:"decisive_battle" + targetNationId: Launch a full-scale invasion. Only when at war.`,
     `  expansion:"none": Do not expand militarily this turn.`,
     ``,
     `  economy:"army_building": Build military units (needed before attacking).`,
-    `  economy:"construction": Build infrastructure to grow population and economy.`,
+    `  economy:"construction": Build infrastructure to grow population and economy. Add "constructionIntent": pueblo (new pueblo needs origin>=100 pop) | ciudad (upgrade, medieval+) | reino (vassal 👑, medieval/dark only, needs 10 nation cities + 2 in province, 1/province) | auto.`,
     `  economy:"recovery": Conserve resources to recover population and stability.`,
+    ``,
+    `  Carts (optional, decide by need): your stables lvl.3 build carts (50 foot each, fast). "cartMove":{"fromProvinceId","toProvinceId","carts"} moves carts between YOUR provinces (1 gold each). "cartOffer":{"targetNationId","carts","pricePerCart"} sells to another nation: YOU set pricePerCart (must be >= 2 gold, always above the 1-gold cost, higher if you need gold). "acceptCartOfferId":"offer-id" accepts an incoming offer (pay on arrival). Omit or null when no trade needed.`,
+    `  Your carts: ${cartStatus}`,
+    `  Incoming cart offers: ${incomingOffers}`,
+    ``,
+    `  Overpopulation is per city: staying above cap cuts production (floor 10%). Moving costs 1 gold per tramo + losses (0-10% + 2%/tramo, cap 25%). "traslado":{"fromCityId","toCityId","colonos"} moves people between YOUR cities. Omit or null.`,
+    `  Your cities: ${cityStatus}`,
+    `  Nearby moves: ${moveOptions}`,
+    `  Prisoners and captured civilians: "doctrina":{"ejecutarPct":0-100} sets the % you execute on each capture (default 0 civilians / motor 10 prisoners; rest is spared, 20% escape home, 10% die). Omit to accept everyone.`,
     ``,
     `  diplomacy:"declare_war" + targetNationId: Formally declare war (allows attacking).`,
     `  diplomacy:"seek_alliance" + targetNationId: Form a military alliance.`,
     `  diplomacy:"seek_peace" + targetNationId: Negotiate a truce with a hostile nation.`,
     `  diplomacy:"none": No diplomatic action this turn.`,
     ``,
-    `WARNING: targetNationId MUST be one of the Other nations IDs above (NOT your own id="${context.nationId}").`,
-    `If you have low population (0-2000), you should use control_city to capture an enemy city and steal its population. Declare war first, then control_city to attack.`,
+    `  era:"advance_era": Pay gold to enter the next era (costs rise but production/exploration improve + unlocks).${skipInfo}`,
+    `  era:"skip_dark": Only from medieval: skip the optional dark age and jump straight to modern.`,
+    `  era:"stay": Remain in the current era.`,
     ``,
-    `Current policies: Expansion=${policy?.expansion?.policy ?? "unknown"}, Economy=${policy?.economy?.policy ?? "unknown"}, Diplomacy=${policy?.diplomacy?.policy ?? "unknown"}`,
+    `DECISION RULES — follow these in order:`,
+    `  1. If gold >= 1 and neutral provinces exist: choose peaceful_expand with targetNationId: null`,
+    `  2. If at war with a nation: choose control_city or decisive_battle with that nation as target`,
+    `  3. If no neutral territory and no war: choose none or construction/recovery`,
+    ``,
+    `IMPORTANT: targetNationId rules:`,
+    `  - For peaceful_expand: targetNationId MUST be null`,
+    `  - For control_city, control_resource, decisive_battle, declare_war, seek_alliance, seek_peace: targetNationId MUST be a valid Other nation ID from the list above`,
+    `  - NEVER use your own id="${context.nationId}" as a target`,
+    ``,
+    `Current policies: Expansion=${policy?.expansion?.policy ?? "unknown"}, Economy=${policy?.economy?.policy ?? "unknown"}, Diplomacy=${policy?.diplomacy?.policy ?? "unknown"}, Era=${(policy as any)?.era?.policy ?? "stay"}`,
+    ``,
+    `EXAMPLES of valid JSON responses:`,
+    `  When neutral territory is available: {"expansion":"peaceful_expand","economy":"construction","diplomacy":"none","targetNationId":null,"rationale":"Colonizing neutral territory to grow peacefully"}`,
+    `  When at war: {"expansion":"control_city","economy":"army_building","diplomacy":"declare_war","targetNationId":"enemy_nation_id","rationale":"Capturing cities to weaken the enemy"}`,
+    `  When no expansion needed: {"expansion":"none","economy":"construction","diplomacy":"seek_alliance","era":"stay","targetNationId":null,"rationale":"Building infrastructure and alliances"}`,
     ``,
     "Respond ONLY with valid JSON, no explanation, no analysis, no reasoning text:",
-    '{"expansion":"control_city"|"control_resource"|"decisive_battle"|"peaceful_expand"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","targetNationId":"nation_id","rationale":"brief reason"}',
+    '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null}',
   ].join("\n");
 }
 
@@ -182,6 +344,7 @@ function parseDecision(raw: string): LLMDecision | null {
       targetTileId: parsed.targetTileId,
           economy: parsed.economy ?? "construction",
           diplomacy: parsed.diplomacy ?? "none",
+          era: parsed.era ?? "stay",
           targetNationId: parsed.targetNationId ?? null,
           rationale: parsed.rationale ?? "",
         };
@@ -197,8 +360,14 @@ function parseDecision(raw: string): LLMDecision | null {
       targetTileId: parsed.targetTileId,
       economy: parsed.economy ?? "construction",
       diplomacy: parsed.diplomacy ?? "none",
+      era: parsed.era ?? "stay",
       targetNationId: parsed.targetNationId ?? null,
       rationale: parsed.rationale ?? "",
+      cartMove: normalizeCartMove(parsed.cartMove),
+      cartOffer: normalizeCartOffer(parsed.cartOffer),
+      acceptCartOfferId: typeof parsed.acceptCartOfferId === "string" ? parsed.acceptCartOfferId : undefined,
+      traslado: normalizeTraslado(parsed.traslado),
+      doctrina: normalizeDoctrina(parsed.doctrina),
     };
   } catch {
     const extract = (key: string): string | null => {
@@ -212,10 +381,47 @@ function parseDecision(raw: string): LLMDecision | null {
     const expansion = extract("expansion") ?? "none";
     const economy = extract("economy") ?? "construction";
     const diplomacy = extract("diplomacy") ?? "none";
+    const era = extract("era") ?? "stay";
     const targetNationId = extract("targetNationId") ?? undefined;
     const rationale = extract("rationale") ?? "";
-    return { expansion, economy, diplomacy, targetNationId, rationale };
+    return { expansion, economy, diplomacy, era, targetNationId, rationale };
   }
+}
+
+function normalizeCartMove(value: unknown): LLMDecision["cartMove"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.fromProvinceId !== "string" || typeof v.toProvinceId !== "string") return undefined;
+  const carts = Math.floor(Number(v.carts));
+  if (!Number.isFinite(carts) || carts < 1) return undefined;
+  return { fromProvinceId: v.fromProvinceId, toProvinceId: v.toProvinceId, carts };
+}
+
+function normalizeCartOffer(value: unknown): LLMDecision["cartOffer"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.targetNationId !== "string") return undefined;
+  const carts = Math.floor(Number(v.carts));
+  const price = Math.floor(Number(v.pricePerCart));
+  if (!Number.isFinite(carts) || carts < 1 || !Number.isFinite(price) || price < 1) return undefined;
+  return { targetNationId: v.targetNationId, carts, pricePerCart: price };
+}
+
+function normalizeTraslado(value: unknown): LLMDecision["traslado"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.fromCityId !== "string" || typeof v.toCityId !== "string") return undefined;
+  const colonos = Math.floor(Number(v.colonos));
+  if (!Number.isFinite(colonos) || colonos < 1) return undefined;
+  return { fromCityId: v.fromCityId, toCityId: v.toCityId, colonos };
+}
+
+function normalizeDoctrina(value: unknown): LLMDecision["doctrina"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  const pct = Math.floor(Number(v.ejecutarPct));
+  if (!Number.isFinite(pct)) return undefined;
+  return { ejecutarPct: Math.max(0, Math.min(100, pct)) };
 }
 
 function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext): void {
@@ -227,6 +433,7 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
   const validExpansions = new Set(["control_city", "control_resource", "decisive_battle", "peaceful_expand", "none"]);
   const validEconomies = new Set(["army_building", "construction", "recovery"]);
   const validDiplomacies = new Set(["declare_war", "seek_alliance", "seek_peace", "seek_vassalage", "demand_vassalage", "none", "surrender"]);
+  const validEras = new Set(["advance_era", "skip_dark", "stay"]);
 
   // Sanitizar: "declare_war" no es ExpansionPolicy válida; va por diplomacia.
   let expansion = validExpansions.has(decision.expansion) ? decision.expansion : "none";
@@ -249,6 +456,10 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
   }
 
   if (decision.economy && validEconomies.has(decision.economy)) {
+    const validIntents = new Set(["pueblo", "ciudad", "reino", "auto"]);
+    const intent = validIntents.has((decision as unknown as { constructionIntent?: string }).constructionIntent ?? "")
+      ? (decision as unknown as { constructionIntent: string }).constructionIntent
+      : "auto";
     nationPolicies.economy = {
       policy: decision.economy as any,
       label: decision.economy,
@@ -256,6 +467,7 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
       decidedAtMonth: context.turnNumber,
       nextDecisionMonth: context.turnNumber + 2,
     };
+    (nationPolicies as unknown as { constructionIntent: string }).constructionIntent = intent;
   } else if (decision.economy) {
     nationPolicies.economy = { ...nationPolicies.economy, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
   }
@@ -274,8 +486,35 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
     nationPolicies.diplomacy = { ...nationPolicies.diplomacy, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
   }
 
+  if (decision.era && validEras.has(decision.era)) {
+    nationPolicies.era = {
+      policy: decision.era as any,
+      label: decision.era,
+      rationale: decision.rationale || "",
+      decidedAtMonth: context.turnNumber,
+      nextDecisionMonth: context.turnNumber + 2,
+    };
+  } else if (decision.era) {
+    nationPolicies.era = { ...nationPolicies.era, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
+  }
+
   nationPolicies.decidedAtMonth = context.turnNumber;
   nationPolicies.nextDecisionMonth = context.turnNumber + 2;
+
+  // Comercio de carretas: todo lo decide la IA por necesidad (traslado,
+  // oferta con precio propio, aceptación). El motor valida y ejecuta.
+  const cartPolicy = nationPolicies as unknown as {
+    cartMove?: LLMDecision["cartMove"];
+    cartOffer?: LLMDecision["cartOffer"];
+    acceptCartOfferId?: string;
+    traslado?: LLMDecision["traslado"];
+    doctrina?: LLMDecision["doctrina"];
+  };
+  cartPolicy.cartMove = decision.cartMove;
+  cartPolicy.cartOffer = decision.cartOffer;
+  cartPolicy.acceptCartOfferId = decision.acceptCartOfferId;
+  cartPolicy.traslado = decision.traslado;
+  cartPolicy.doctrina = decision.doctrina;
 
   // NO inventar eventos war_declared aquí: la guerra real la crea
   // executeDiplomacyPoliciesWithEvents en resolveTurn a partir de nationPolicies.

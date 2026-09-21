@@ -2,6 +2,7 @@ import {
   COMBAT_EVENT_KINDS,
   DIPLOMACY_EVENT_KINDS,
   EXPANSION_EVENT_KINDS,
+  INGENIERIA_EVENT_KINDS,
   LOGISTICS_EVENT_KINDS,
   MARKET_EVENT_KINDS,
   RESUMEN_TODO_KINDS,
@@ -11,6 +12,7 @@ import {
   isCombatEventKind,
   isDiplomacyEventKind,
   isExpansionEventKind,
+  isIngenieriaEventKind,
   isLogisticsEventKind,
   isSpyEventKind,
 } from "../src/world/eventCategories";
@@ -74,6 +76,17 @@ describe("eventCategories", () => {
     expect(getEventCacheKey("peaceful_expand" as any)).toBe("resumen-expansiones");
     expect(getEventCacheKey("market" as any)).toBeNull();
     expect(getEventCacheKey("hunger" as any)).toBeNull();
+  });
+
+  test("ingeniería tiene su marca (badge 🏗️) y su caché", () => {
+    expect(INGENIERIA_EVENT_KINDS).toEqual(["construction", "city_developed", "era"]);
+    expect(isIngenieriaEventKind("construction" as any)).toBe(true);
+    expect(isIngenieriaEventKind("city_developed" as any)).toBe(true);
+    expect(isIngenieriaEventKind("era" as any)).toBe(true);
+    expect(isIngenieriaEventKind("peaceful_expand" as any)).toBe(false);
+    expect(getEventCacheKey("construction" as any)).toBe("resumen-ingenieria");
+    expect(getEventCacheKey("city_developed" as any)).toBe("resumen-ingenieria");
+    expect(getEventCacheKey("era" as any)).toBe("resumen-ingenieria");
   });
 
   test("levy tiene stats de mitad de soldado a 0.015 oro", () => {

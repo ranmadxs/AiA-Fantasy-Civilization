@@ -3,10 +3,16 @@ import pkg from "../package.json";
 import { type MapMode, WorldMap } from "./components/WorldMap";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { debug } from "./world/debugLog";
+import { loadNationModelConfigs, fetchServerConfigs, saveNationModelConfigs, type NationModelConfigs } from "./world/modelConfig";
+import { getModelIconForConfig } from "./resources/modelIcons";
+import { ConnectionMonitor } from "./world/connectionMonitor";
+import { OfflineOverlay } from "./components/OfflineOverlay";
 import { MainMenu, DEFAULT_FREE_PROVINCE_RATIO, type NewGameSettings } from "./components/MainMenu";
+import { LanguageSelector } from "./components/LanguageSelector";
 import { NationModelConfiguration } from "./components/NationModelConfiguration";
 import { buildDemoWorld } from "./world/buildDemoWorld";
 import { calculateCityEconomy, calculateNationCityEconomy } from "./world/cityEconomy";
+import { formatPopulation } from "./world/formatPopulation";
 import {
   evaluateDiplomaticProposalsWithEvents,
   executeDiplomacyPoliciesWithEvents,
@@ -26,13 +32,28 @@ import {
   isCombatEventKind,
   isDiplomacyEventKind,
   isExpansionEventKind,
+  isIngenieriaEventKind,
   isLogisticsEventKind,
   isSpyEventKind,
   type GuerraSubTab,
-  type MercadoSubTab,
-  type ResumenSubTab,
+  type GeneralSubTab,
   type TopEventTab,
 } from "./world/eventCategories";
+import { formatConstructionBudget, getBuildingConfigRows, getEraConfigTable, type ConstructionProject, type MinaDeCarbon, type Aserradero } from "./world/construction";
+import {
+  BUILDING_LIST,
+  ERA_LIST,
+  BUILDING_LABELS,
+  ERA_LABELS,
+  type ConstructionKind,
+} from "./world/configDefaults";
+import {
+  getLiveBaseCosts,
+  getLiveMaintenanceCosts,
+  setLiveBaseCosts,
+  setLiveMaintenanceCosts,
+} from "./world/constructionConfig";
+import { getLiveDensity, setLiveDensity } from "./world/density";
 import type { MarketOffer, MarketState, Transaction } from "./world/market";
 import {
   advanceNationPolicies,
@@ -47,6 +68,7 @@ import {
 } from "./world/relationships";
 import {
   calculateNationMonthlyIncome,
+  getEraVitalityRows,
   type NationStockpile,
 } from "./world/settlement";
 import {
@@ -74,6 +96,22 @@ import {
   type DefeatedNationRecord,
   type TurnProgress,
 } from "./world/turnSimulation";
+import {
+  formatEraEmoji,
+  formatEraLabel,
+  getNationEra,
+  type EraState,
+} from "./world/era";
+import {
+  buildEventDocs,
+  buildNationDocs,
+  buildNationMonthlyDocs,
+  buildWorldMonthlyDoc,
+  mongoNewRun,
+  mongoSendTurn,
+  type MongoRunCtx,
+} from "./world/mongoSync";
+import { createLLMExecutor } from "./world/llmExecutor";
 import { isNationDefeated } from "./world/nationStatus";
 import { localizeText, type Language } from "./world/localization";
 
@@ -108,17 +146,25 @@ export default function App() {
   const [mapMode, setMapMode] = useState<MapMode>("political");
   const [isRunning, setIsRunning] = useState(false);
   const [speed, setSpeed] = useState<SimulationSpeed>(1);
-  const [eventLogMode, setEventLogMode] = useState<TopEventTab>("resumen");
-  const [resumenSub, setResumenSub] = useState<ResumenSubTab>("todo");
+  const [eventLogMode, setEventLogMode] = useState<TopEventTab>("general");
+  const [generalSub, setGeneralSub] = useState<GeneralSubTab>("todo");
   const [guerraSub, setGuerraSub] = useState<GuerraSubTab>("todos");
-  const [mercadoSub, setMercadoSub] = useState<MercadoSubTab>("ofertas");
   const [eventNationId, setEventNationId] = useState<string | undefined>();
   const [isEventPanelOpen, setIsEventPanelOpen] = useState(true);
   const [isPanelOpen, setIsPanelOpen] = useState(true);
   const [dismissVictory, setDismissVictory] = useState(false);
+  const [configMode, setConfigMode] = useState<"none" | "construction" | "maintenance" | "era" | "density">("none");
+  const [configConstruction, setConfigConstruction] = useState<Record<ConstructionKind, Record<string, number>>>(() => JSON.parse(JSON.stringify(getLiveBaseCosts())));
+  const [configMaintenance, setConfigMaintenance] = useState<Record<ConstructionKind, number>>(() => ({ ...getLiveMaintenanceCosts() }));
+  const [configDensity, setConfigDensity] = useState<Record<string, number>>(() => ({ ...getLiveDensity() }));
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [nationConfigs, setNationConfigs] = useState(() => loadNationModelConfigs(world));
+  const [isOffline, setIsOffline] = useState(false);
   const [simulation, setSimulation] = useState<SimulationState>(() => createInitialSimulationState(world));
   const simulationRef = useRef(simulation);
   const turnInProgressRef = useRef(false);
+  const mongoRunRef = useRef<MongoRunCtx | null>(null);
   const [turnProgress, setTurnProgress] = useState<TurnProgress>({
     turnNumber: 1,
     completedNationIds: [],
@@ -132,15 +178,94 @@ export default function App() {
     world.provinces[0]?.id,
   );
   useDomLocalization(appRootRef, language);
+  // Servidor manda: al montar, trae prefs en background y actualiza la caché local.
+  useEffect(() => {
+    void fetchServerConfigs(world).then((serverConfigs) => {
+      if (serverConfigs) {
+        saveNationModelConfigs(serverConfigs);
+      }
+    });
+  }, []);
   const worldTime = useMemo(
     () => formatWorldTime(simulation.elapsedMonths),
     [simulation.elapsedMonths],
   );
+
+  // ===== CONFIG LOAD/SAVE =====
+  const loadConfig = async (key: "construction_costs" | "maintenance_costs" | "density") => {
+    try {
+      const res = await fetch(`/__aia-mongo/config?key=${key}`);
+      if (res.ok) {
+        const { config } = await res.json();
+        return config.data;
+      }
+    } catch {}
+    return null;
+  };
+
+  const saveConfig = async (key: "construction_costs" | "maintenance_costs" | "density", data: unknown) => {
+    try {
+      const res = await fetch("/__aia-mongo/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, data, updatedBy: "gui" }),
+      });
+      if (!res.ok) throw new Error("Error guardando");
+      return true;
+    } catch (e) {
+      setConfigError(e instanceof Error ? e.message : "Error guardando");
+      return false;
+    }
+  };
+
+  const loadAllConfigs = async () => {
+    setConfigLoading(true);
+    setConfigError(null);
+    try {
+      const [construction, maintenance, density] = await Promise.all([
+        loadConfig("construction_costs"),
+        loadConfig("maintenance_costs"),
+        loadConfig("density"),
+      ]);
+      if (construction && setLiveBaseCosts(construction)) {
+        setConfigConstruction(JSON.parse(JSON.stringify(getLiveBaseCosts())));
+      }
+      if (maintenance && setLiveMaintenanceCosts(maintenance)) {
+        setConfigMaintenance({ ...getLiveMaintenanceCosts() });
+      }
+      if (density && setLiveDensity(density)) {
+        setConfigDensity({ ...getLiveDensity() });
+      }
+    } catch (e) {
+      setConfigError(e instanceof Error ? e.message : "Error cargando");
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
+  const saveAllConfigs = async (): Promise<void> => {
+    setConfigLoading(true);
+    setConfigError(null);
+    setLiveBaseCosts(configConstruction);
+    setLiveMaintenanceCosts(configMaintenance);
+    setLiveDensity(configDensity);
+    const ok1 = await saveConfig("construction_costs", configConstruction);
+    const ok2 = await saveConfig("maintenance_costs", configMaintenance);
+    const ok3 = await saveConfig("density", configDensity);
+    setConfigLoading(false);
+    if (!ok1 || !ok2 || !ok3) throw new Error("Error guardando configuración");
+  };
+
+  // Cargar configs al montar
+  useEffect(() => {
+    loadAllConfigs();
+  }, []);
   const eventCachesRef = useRef<Record<string, GameEvent[]>>({
-    "resumen-todo": [],
-    "resumen-diplomacia": [],
-    "resumen-expansiones": [],
-    "resumen-espionaje": [],
+    "general-todo": [],
+    "general-diplomacia": [],
+    "general-expansiones": [],
+    "general-espionaje": [],
+    "general-ingenieria": [],
     "guerra-combate": [],
     "guerra-logistica": [],
     "nacion": [],
@@ -149,8 +274,8 @@ export default function App() {
 
   const currentCacheKey = (() => {
     switch (eventLogMode) {
-      case "resumen":
-        return `resumen-${resumenSub}`;
+      case "general":
+        return `general-${generalSub}`;
       case "guerra":
         return `guerra-${guerraSub}`;
       case "nacion":
@@ -163,7 +288,7 @@ export default function App() {
   if (simulation.events.length > lastEventCountRef.current) {
     const newEvents = simulation.events.slice(lastEventCountRef.current);
     for (const event of newEvents) {
-      const key = getEventCacheKey(event.kind) ?? "resumen-todo";
+      const key = getEventCacheKey(event.kind) ?? "general-todo";
       if (eventCachesRef.current[key]) {
         eventCachesRef.current[key] = [
           event,
@@ -189,9 +314,13 @@ export default function App() {
       const logistics = eventCachesRef.current["guerra-logistica"] ?? [];
       return sortEventsNewestFirst([...combat, ...logistics]).slice(0, 800);
     }
-    return currentCacheKey
-      ? (eventCachesRef.current[currentCacheKey] ?? [])
-      : simulation.events;
+    if (currentCacheKey) {
+      const cached = eventCachesRef.current[currentCacheKey];
+      if (cached && cached.length > 0) return cached;
+      // Si la caché está vacía, reconstruir desde simulation.events
+      return sortEventsNewestFirst(simulation.events).slice(0, 800);
+    }
+    return simulation.events;
   })();
 
   const marketOffers = useMemo<MarketOffer[]>(
@@ -202,10 +331,7 @@ export default function App() {
     () => [...(simulation.marketState?.transactions ?? [])].sort((a, b) => b.executedAt - a.executedAt).slice(0, 60),
     [simulation.marketState],
   );
-  const selectedEventNation = useMemo(
-    () => eventNationId ? world.nationById.get(eventNationId) : undefined,
-    [eventNationId],
-  );
+  
   const visibleArmyGroups = useMemo(
     () => getAllArmyGroups(simulation.military),
     [simulation.military],
@@ -225,6 +351,7 @@ export default function App() {
       simulation.military,
       simulation.spies,
       simulation.elapsedMonths,
+      simulation.eraState,
     ),
     [selectedNationId, simulation],
   );
@@ -240,9 +367,28 @@ export default function App() {
 
     turnInProgressRef.current = true;
     try {
-      const next = await advanceSimulationTurn(world, simulationRef.current, undefined, setTurnProgress);
+      // Executor fresco por turno desde lo guardado (servidor manda, local de caché):
+      // lo que guardes aplica al turno siguiente sin hacer nada más.
+      const llmExecutor = createLLMExecutor(loadNationModelConfigs(world));
+      const prevEventCount = simulationRef.current.events.length;
+      // Vía B: los eventos se generan en el idioma activo (ES) o inglés por defecto.
+      const next = await advanceSimulationTurn(world, simulationRef.current, llmExecutor, setTurnProgress, language === "es" ? "es" : "en");
       simulationRef.current = next;
       setSimulation(next);
+      // Mongo (best-effort, no bloquea): persiste el mes recién simulado.
+      const mongoCtx = mongoRunRef.current;
+      if (mongoCtx) {
+        const newEvents = next.events.slice(prevEventCount);
+        const simMonth = next.elapsedMonths;
+        const nationMonthly = buildNationMonthlyDocs(world, next, mongoCtx.seed, simMonth);
+        void mongoSendTurn(mongoCtx, {
+          eventDocs: buildEventDocs(newEvents, mongoCtx.seed),
+          nationMonthlyDocs: nationMonthly,
+          worldMonthlyDoc: buildWorldMonthlyDoc(world, nationMonthly, mongoCtx.seed, simMonth),
+          monthsSimulated: simMonth,
+          status: next.gameOver ? "gameover" : undefined,
+        });
+      }
       if (next.gameOver) {
         setIsRunning(false);
       }
@@ -253,11 +399,18 @@ export default function App() {
         phase: "idle",
       });
     } catch (error) {
-      console.error("国家回合执行失败，本回合未推进：", error);
+      debug.tag("App").error("国家回合执行失败，本回合未推进：", error);
       setIsRunning(false);
     } finally {
       turnInProgressRef.current = false;
     }
+  }, [language]);
+
+  useEffect(() => {
+    const monitor = ConnectionMonitor.getInstance();
+    monitor.onChange((state) => setIsOffline(state === "disconnected"));
+    monitor.start();
+    return () => { monitor.stop(); };
   }, []);
 
   useEffect(() => {
@@ -327,6 +480,12 @@ export default function App() {
     debug.timeEnd("app:buildDemoWorld nuevo juego");
     const nextSimulation = createInitialSimulationState(nextWorld);
     world = nextWorld;
+    // Servidor manda: sincroniza prefs en background para el mundo nuevo.
+    void fetchServerConfigs(world).then((serverConfigs) => {
+      if (serverConfigs) {
+        saveNationModelConfigs(serverConfigs);
+      }
+    });
     simulationRef.current = nextSimulation;
     setSimulation(nextSimulation);
     setTurnProgress({
@@ -337,10 +496,9 @@ export default function App() {
     });
     setIsRunning(false);
     setEventNationId(undefined);
-    setEventLogMode("resumen");
-    setResumenSub("todo");
+    setEventLogMode("general");
+    setGeneralSub("todo");
     setGuerraSub("todos");
-    setMercadoSub("ofertas");
     setDismissVictory(false);
     setSelectedCityId(undefined);
     setCityReturnNationId(undefined);
@@ -348,6 +506,47 @@ export default function App() {
     setSelectedProvinceId(nextWorld.provinces[0]?.id);
     setWorldRevision((revision) => revision + 1);
     setActiveSurface("world");
+    // Resetear caché de eventos para nuevo juego
+    eventCachesRef.current = {
+      "general-todo": [],
+      "general-diplomacia": [],
+      "general-expansiones": [],
+      "general-espionaje": [],
+      "general-ingenieria": [],
+      "guerra-combate": [],
+      "guerra-logistica": [],
+      "nacion": [],
+    };
+    lastEventCountRef.current = 0;
+    // Mongo (best-effort, no bloquea): crea el run + naciones con su LLM.
+    const mongoConfigs = loadNationModelConfigs(nextWorld);
+    void mongoNewRun({
+      seed: settings.seed,
+      worldParams: {
+        nationCount: settings.nationCount,
+        cityCount: settings.cityCount,
+        freeProvinceRatio: settings.freeProvinceRatio,
+      },
+      worldSummary: {
+        nations: nextWorld.nations.length,
+        provinces: nextWorld.provinces.length,
+        cities: nextWorld.cities.length,
+        tiles: nextWorld.tiles.length,
+      },
+      llmNations: nextWorld.nations.map((nation) => {
+        const config = mongoConfigs[nation.id];
+        return {
+          nationId: nation.id,
+          provider: config?.providerName ?? "",
+          model: config?.model ?? "",
+          enabled: config?.enabled ?? false,
+        };
+      }),
+      nations: buildNationDocs(nextWorld, mongoConfigs, settings.seed),
+      createdBy: "gui",
+    }).then((ctx) => {
+      mongoRunRef.current = ctx;
+    });
   }, []);
 
   return (
@@ -365,11 +564,12 @@ export default function App() {
           language={language}
           onChangeLanguage={setLanguage}
           onStartGame={handleStartGame}
+          onConfig={() => setConfigMode("construction")}
         />
       ) : activeSurface === "configuration" ? (
         <NationModelConfiguration
           language={language}
-          onBack={() => setActiveSurface("world")}
+          onBack={() => { setNationConfigs(loadNationModelConfigs(world)); setActiveSurface("world"); }}
           world={world}
         />
       ) : (
@@ -387,12 +587,10 @@ export default function App() {
         {isEventPanelOpen && (
           <EventLogPanel
             eventLogMode={eventLogMode}
-            resumenSub={resumenSub}
+            generalSub={generalSub}
             guerraSub={guerraSub}
-            mercadoSub={mercadoSub}
-            onSelectResumenSub={setResumenSub}
+            onSelectGeneralSub={setGeneralSub}
             onSelectGuerraSub={setGuerraSub}
-            onSelectMercadoSub={setMercadoSub}
             eventNationId={eventNationId}
             nations={world.nations}
             activeEvents={activeEvents}
@@ -401,7 +599,10 @@ export default function App() {
             onSelectNation={setEventNationId}
             marketOffers={marketOffers}
             marketTransactions={marketTransactions}
-            selectedEventNation={selectedEventNation}
+            constructionProjects={simulation.constructionProjects}
+            minasDeCarbon={simulation.minasDeCarbon}
+            aserraderos={simulation.aserraderos}
+            nationConfigs={nationConfigs}
           />
         )}
       </aside>
@@ -425,8 +626,10 @@ export default function App() {
               onSelectProvince={handleSelectProvince}
               language={language}
               eraState={simulation.eraState}
+              nationConfigs={nationConfigs}
             />
             </ErrorBoundary>
+            <OfflineOverlay visible={isOffline} />
             <div className="scFrameRight" />
           </div>
           <div className="scFrameBottom">
@@ -480,16 +683,8 @@ export default function App() {
             ) : (
               <>
                 <header>
-                  <p className="eyebrow">AI Sandbox de Civilización v{pkg.version}</p>
                   <h1>AI Sandbox de Civilización v{pkg.version}</h1>
-                  <label className="languageControl">
-                    <span>{language === "zh" ? "游戏语言" : language === "es" ? "Idioma del Juego" : "Game Language"}</span>
-                    <select value={language} onChange={(event) => setLanguage(event.target.value as Language)}>
-                        <option value="es">Español</option>
-                        <option value="zh">中文</option>
-                        <option value="en">English</option>
-                    </select>
-                  </label>
+                  <LanguageSelector compact language={language} onChangeLanguage={setLanguage} showNames={false} />
                 </header>
                 <section className="mapModePanel">
                   <h2>Map Mode</h2>
@@ -551,7 +746,7 @@ export default function App() {
                     </strong>
                   </div>
                 </section>
-                <button
+<button
                   className="aiConfigEntry"
                   onClick={() => {
                     setIsRunning(false);
@@ -560,7 +755,16 @@ export default function App() {
                   type="button"
                 >
                   <span>AI Configuration</span>
-                  <small>Models &amp; personalities</small>
+                  <small>Models & personalities</small>
+                </button>
+                <button
+                  className="aiConfigEntry"
+                  onClick={() => setConfigMode("construction")}
+                  type="button"
+                  disabled={configLoading}
+                >
+                  <span>⚙️ Configuración</span>
+                  <small>Costos & mantenimiento</small>
                 </button>
                 <div className="statGrid">
                   <div>
@@ -665,10 +869,26 @@ export default function App() {
             )}
           </div>
         )}
-      </aside>
-        </>
-      )}
-    </main>
+</aside>
+         </>
+       )}
+       {configMode !== "none" && (
+          <ConfigPanel
+            onClose={() => setConfigMode("none")}
+            onSelectMode={setConfigMode}
+            configMode={configMode}
+            configConstruction={configConstruction}
+            configMaintenance={configMaintenance}
+            configDensity={configDensity}
+            setConfigConstruction={setConfigConstruction}
+            setConfigMaintenance={setConfigMaintenance}
+            setConfigDensity={setConfigDensity}
+            configLoading={configLoading}
+            configError={configError}
+            onSave={saveAllConfigs}
+          />
+       )}
+     </main>
   );
 }
 
@@ -677,12 +897,10 @@ type CityStats = NonNullable<ReturnType<typeof buildCityStats>>;
 
 function EventLogPanel({
   eventLogMode,
-  resumenSub,
+  generalSub,
   guerraSub,
-  mercadoSub,
-  onSelectResumenSub,
+  onSelectGeneralSub,
   onSelectGuerraSub,
-  onSelectMercadoSub,
   eventNationId,
   nations,
   activeEvents,
@@ -691,15 +909,16 @@ function EventLogPanel({
   onSelectNation,
   marketOffers,
   marketTransactions,
-  selectedEventNation,
+  constructionProjects,
+  minasDeCarbon,
+  aserraderos,
+  nationConfigs,
 }: {
   eventLogMode: TopEventTab;
-  resumenSub: ResumenSubTab;
+  generalSub: GeneralSubTab;
   guerraSub: GuerraSubTab;
-  mercadoSub: MercadoSubTab;
-  onSelectResumenSub: (sub: ResumenSubTab) => void;
+  onSelectGeneralSub: (sub: GeneralSubTab) => void;
   onSelectGuerraSub: (sub: GuerraSubTab) => void;
-  onSelectMercadoSub: (sub: MercadoSubTab) => void;
   eventNationId: string | undefined;
   nations: Nation[];
   activeEvents: GameEvent[];
@@ -708,8 +927,12 @@ function EventLogPanel({
   onSelectNation: (nationId: string) => void;
   marketOffers: MarketOffer[];
   marketTransactions: Transaction[];
-  selectedEventNation: Nation | undefined;
+  constructionProjects: ConstructionProject[];
+  minasDeCarbon: MinaDeCarbon[];
+  aserraderos: Aserradero[];
+  nationConfigs: NationModelConfigs;
 }) {
+  const selectedEventNation = eventNationId ? nations.find((n) => n.id === eventNationId) : undefined;
   const handleSelectTab = (tab: TopEventTab) => {
     onBackToNationList();
     onSelectMode(tab);
@@ -723,11 +946,11 @@ function EventLogPanel({
       </header>
       <div className="segmentedControl eventModeControl eventTopTabs" role="group" aria-label="Event log mode">
         <button
-          className={eventLogMode === "resumen" ? "active" : ""}
-          onClick={() => handleSelectTab("resumen")}
-          type="button"
-        >
-          Resumen
+           className={eventLogMode === "general" ? "active" : ""}
+           onClick={() => handleSelectTab("general")}
+           type="button"
+         >
+           General
         </button>
         <button
           className={eventLogMode === "nacion" ? "active" : ""}
@@ -751,35 +974,42 @@ function EventLogPanel({
           Mercado
         </button>
       </div>
-      {eventLogMode === "resumen" && (
-        <div className="segmentedControl eventSubTabs" role="group" aria-label="Resumen filter">
+      {eventLogMode === "general" && (
+        <div className="segmentedControl eventSubTabs" role="group" aria-label="General filter">
           <button
-            className={resumenSub === "todo" ? "active" : ""}
-            onClick={() => onSelectResumenSub("todo")}
+            className={generalSub === "todo" ? "active" : ""}
+            onClick={() => onSelectGeneralSub("todo")}
             type="button"
           >
             Todo
           </button>
           <button
-            className={resumenSub === "diplomacia" ? "active" : ""}
-            onClick={() => onSelectResumenSub("diplomacia")}
+            className={generalSub === "diplomacia" ? "active" : ""}
+            onClick={() => onSelectGeneralSub("diplomacia")}
             type="button"
           >
             Diplomacia
           </button>
           <button
-            className={resumenSub === "expansiones" ? "active" : ""}
-            onClick={() => onSelectResumenSub("expansiones")}
+            className={generalSub === "expansiones" ? "active" : ""}
+            onClick={() => onSelectGeneralSub("expansiones")}
             type="button"
           >
             Expansiones
           </button>
           <button
-            className={resumenSub === "espionaje" ? "active" : ""}
-            onClick={() => onSelectResumenSub("espionaje")}
+            className={generalSub === "espionaje" ? "active" : ""}
+            onClick={() => onSelectGeneralSub("espionaje")}
             type="button"
           >
             Espionaje
+          </button>
+          <button
+            className={generalSub === "ingenieria" ? "active" : ""}
+            onClick={() => onSelectGeneralSub("ingenieria")}
+            type="button"
+          >
+            Ingeniería
           </button>
         </div>
       )}
@@ -808,28 +1038,15 @@ function EventLogPanel({
           </button>
         </div>
       )}
-      {eventLogMode === "mercado" && (
-        <div className="segmentedControl eventSubTabs" role="group" aria-label="Mercado view">
-          <button
-            className={mercadoSub === "ofertas" ? "active" : ""}
-            onClick={() => onSelectMercadoSub("ofertas")}
-            type="button"
-          >
-            Ofertas
-          </button>
-          <button
-            className={mercadoSub === "transacciones" ? "active" : ""}
-            onClick={() => onSelectMercadoSub("transacciones")}
-            type="button"
-          >
-            Transacciones
-          </button>
-        </div>
-      )}
+
       {eventLogMode === "nacion" && !selectedEventNation && (
-        <section className="eventNationSelector">
-          <h2>Nation</h2>
-          <div className="eventNationButtons">
+        <section className="eventListSection">
+          <div className="sectionTitleRow">
+            <h2>Selecciona una nación</h2>
+            <span>{nations.length}</span>
+          </div>
+          <p className="emptyState">Elige una nación para ver sus eventos de los últimos 2 años.</p>
+          <div className="eventNationButtons" style={{ marginTop: "8px" }}>
             {nations.map((nation) => (
               <button
                 className={eventNationId === nation.id ? "active" : ""}
@@ -844,40 +1061,55 @@ function EventLogPanel({
           </div>
         </section>
       )}
-       {eventLogMode === "resumen" && (
+       {eventLogMode === "general" && (
         <section className="eventListSection">
-          <div className="sectionTitleRow">
-            <h2>{resumenSub === "todo" ? "Recent Major Events" : resumenSub === "diplomacia" ? "Diplomacia" : resumenSub === "expansiones" ? "Expansiones" : "Espionaje"}</h2>
-            <span>{activeEvents.length}</span>
+           <div className="sectionTitleRow">
+             <h2>{generalSub === "todo" ? "Recent Major Events" : generalSub === "diplomacia" ? "Diplomacia" : generalSub === "expansiones" ? "Expansiones" : generalSub === "ingenieria" ? "Construcción" : "Espionaje"}</h2>
+            <span>{activeEvents.length}{activeEvents.length >= 800 ? "+" : ""}</span>
           </div>
-          <EventRows events={activeEvents} />
+          {generalSub === "ingenieria" && (
+            <ConstructionQueue
+              projects={constructionProjects}
+              nations={nations}
+              minasDeCarbon={minasDeCarbon}
+              aserraderos={aserraderos}
+            />
+          )}
+          <EventRows events={activeEvents} nations={nations} configs={nationConfigs} />
         </section>
-      )}
+       )}
       {eventLogMode === "guerra" && (
         <section className="eventListSection">
           <div className="sectionTitleRow">
             <h2>{guerraSub === "todos" ? "Guerra: Todos" : guerraSub === "combate" ? "Guerra: Combate" : "Guerra: Logística"}</h2>
-            <span>{activeEvents.length}</span>
+            <span>{activeEvents.length}{activeEvents.length >= 800 ? "+" : ""}</span>
           </div>
-          <EventRows events={activeEvents} />
+          <EventRows events={activeEvents} nations={nations} configs={nationConfigs} />
         </section>
       )}
-      {eventLogMode === "mercado" && mercadoSub === "ofertas" && (
+      {eventLogMode === "mercado" && (
         <section className="eventListSection">
           <div className="sectionTitleRow">
-            <h2>Ofertas</h2>
-            <span>{marketOffers.length}</span>
+            <h2>Mercado</h2>
+            <span>{marketOffers.length} ofertas · {marketTransactions.length} transacciones</span>
           </div>
-          <MarketOffersTable offers={marketOffers} nations={nations} />
-        </section>
-      )}
-      {eventLogMode === "mercado" && mercadoSub === "transacciones" && (
-        <section className="eventListSection">
-          <div className="sectionTitleRow">
-            <h2>Transacciones</h2>
-            <span>{marketTransactions.length}</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            {marketOffers.length > 0 && (
+              <>
+                <h3 style={{ margin: "8px 0 0", color: "#9fb7b1", fontSize: "13px" }}>Ofertas vigentes</h3>
+                <MarketOffersTable offers={marketOffers} nations={nations} />
+              </>
+            )}
+            {marketTransactions.length > 0 && (
+              <>
+                <h3 style={{ margin: "16px 0 0", color: "#9fb7b1", fontSize: "13px" }}>Transacciones recientes</h3>
+                <MarketTransactionsTable transactions={marketTransactions} />
+              </>
+            )}
+            {marketOffers.length === 0 && marketTransactions.length === 0 && (
+              <p className="emptyState">Sin actividad en el mercado</p>
+            )}
           </div>
-          <MarketTransactionsTable transactions={marketTransactions} />
         </section>
       )}
       {eventLogMode === "nacion" && selectedEventNation && (
@@ -896,9 +1128,9 @@ function EventLogPanel({
           <section className="eventListSection">
             <div className="sectionTitleRow">
               <h2>Last 2 Years</h2>
-              <span>{activeEvents.length}</span>
+              <span>{activeEvents.length}{activeEvents.length >= 800 ? "+" : ""}</span>
             </div>
-            <EventRows events={activeEvents} />
+            <EventRows events={activeEvents} nations={nations} configs={nationConfigs} />
           </section>
         </section>
       )}
@@ -906,7 +1138,416 @@ function EventLogPanel({
   );
 }
 
-function EventRows({ events }: { events: GameEvent[] }) {
+function ConfigPanel({
+  onClose,
+  onSelectMode,
+  configMode,
+  configConstruction,
+  configMaintenance,
+  configDensity,
+  setConfigConstruction,
+  setConfigMaintenance,
+  setConfigDensity,
+  configLoading,
+  configError,
+  onSave,
+}: {
+  onClose: () => void;
+  onSelectMode: (mode: "construction" | "maintenance" | "era" | "density") => void;
+  configMode: "construction" | "maintenance" | "era" | "density";
+  configConstruction: Record<ConstructionKind, Record<string, number>>;
+  configMaintenance: Record<ConstructionKind, number>;
+  configDensity: Record<string, number>;
+  setConfigConstruction: React.Dispatch<React.SetStateAction<Record<ConstructionKind, Record<string, number>>>>;
+  setConfigMaintenance: React.Dispatch<React.SetStateAction<Record<ConstructionKind, number>>>;
+  setConfigDensity: React.Dispatch<React.SetStateAction<Record<string, number>>>;
+  configLoading: boolean;
+  configError: string | null;
+  onSave: () => Promise<void>;
+}) {
+  const tabs = [
+    { id: "construction", label: "🏗️ Costos base" },
+    { id: "maintenance", label: "🔧 Mantención" },
+    { id: "era", label: "🏛️ Eras" },
+    { id: "density", label: "🌐 Densidad" },
+  ] as const;
+
+  const handleCellChange = (building: ConstructionKind, resource: string, value: string) => {
+    const num = Math.max(0, parseInt(value) || 0);
+    setConfigConstruction(prev => ({
+      ...prev,
+      [building]: {
+        ...prev[building],
+        [resource]: num,
+      },
+    }));
+  };
+
+  const handleMaintenanceChange = (building: ConstructionKind, value: string) => {
+    const num = Math.max(0, parseFloat(value) || 0);
+    setConfigMaintenance(prev => ({ ...prev, [building]: num }));
+  };
+
+  const handleDensityChange = (era: string, value: string) => {
+    const num = Math.max(0, parseInt(value) || 0);
+    setConfigDensity(prev => ({ ...prev, [era]: num }));
+  };
+
+  const costResources = ["gold", "wood", "stone", "iron"];
+  const buildingRows = getBuildingConfigRows(BUILDING_LIST);
+  const eraRows = getEraConfigTable();
+
+  const titles = {
+    construction: "⚙️ Configuración: Costos base de Construcción",
+    maintenance: "⚙️ Configuración: Mantenimiento (oro/turno)",
+    era: "⚙️ Configuración: Eras (buffs y desbloqueos)",
+    density: "⚙️ Configuración: Densidad (hab/tile por era)",
+  } as const;
+
+  return (
+    <div className="configPanel">
+      <header className="configHeader">
+        <h2>{titles[configMode]}</h2>
+        <button className="closeButton" onClick={onClose} type="button">✕</button>
+      </header>
+      <div className="segmentedControl" role="group" aria-label="Config tabs">
+        {tabs.map(tab => (
+          <button
+            key={tab.id}
+            className={configMode === tab.id ? "active" : ""}
+            onClick={() => onSelectMode(tab.id)}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {configError && <div className="configError">{configError}</div>}
+      {configMode === "construction" && (
+        <>
+          <div className="configTableWrapper">
+            <table className="configTable">
+              <thead>
+                <tr>
+                  <th>Edificio</th>
+                  {costResources.map(r => <th key={r}>{r}</th>)}
+                  <th>Meses</th>
+                  <th>Tiles</th>
+                  <th>Produce</th>
+                </tr>
+              </thead>
+              <tbody>
+                {BUILDING_LIST.map(building => {
+                  const info = buildingRows.find(r => r.kind === building);
+                  return (
+                    <tr key={building}>
+                      <td className="configRowLabel">{BUILDING_LABELS[building]}</td>
+                      {costResources.map(resource => (
+                        <td key={resource}>
+                          <input
+                            type="number"
+                            min="0"
+                            value={configConstruction[building]?.[resource] ?? 0}
+                            onChange={e => handleCellChange(building, resource, e.target.value)}
+                            disabled={configLoading}
+                            className="configInput"
+                          />
+                        </td>
+                      ))}
+                      <td>{info?.turns ?? ""}</td>
+                      <td>{info?.tiles ?? 1}</td>
+                      <td>{info?.production ?? ""}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="configHint">Costo real en juego = base × factor de era (ver tab Eras). Capital ×0.8.</p>
+          <footer className="configFooter">
+            <button
+              className="saveButton"
+              onClick={onSave}
+              disabled={configLoading}
+              type="button"
+            >
+              {configLoading ? "Guardando..." : "💾 Guardar Costos"}
+            </button>
+            <button className="cancelButton" onClick={onClose} disabled={configLoading} type="button">
+              Cancelar
+            </button>
+          </footer>
+        </>
+      )}
+      {configMode === "maintenance" && (
+        <>
+          <div className="configTableWrapper">
+            <table className="configTable">
+              <thead>
+                <tr>
+                  <th>Edificio</th>
+                  <th>Oro / Turno</th>
+                </tr>
+              </thead>
+              <tbody>
+                {BUILDING_LIST.map(building => (
+                  <tr key={building}>
+                    <td className="configRowLabel">{BUILDING_LABELS[building]}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={configMaintenance[building] ?? 0}
+                        onChange={e => handleMaintenanceChange(building, e.target.value)}
+                        disabled={configLoading}
+                        className="configInput"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <footer className="configFooter">
+            <button
+              className="saveButton"
+              onClick={onSave}
+              disabled={configLoading}
+              type="button"
+            >
+              {configLoading ? "Guardando..." : "💾 Guardar Mantenimiento"}
+            </button>
+            <button className="cancelButton" onClick={onClose} disabled={configLoading} type="button">
+              Cancelar
+            </button>
+          </footer>
+        </>
+      )}
+      {configMode === "era" && (
+        <>
+          <div className="configTableWrapper">
+            <table className="configTable">
+              <thead>
+                <tr>
+                  <th>Era</th>
+                  <th>Cambio (oro)</th>
+                  <th>Factor costos</th>
+                  <th>Bonus prod.</th>
+                  <th>Dto. explo.</th>
+                  <th>Desbloquea</th>
+                </tr>
+              </thead>
+              <tbody>
+                {eraRows.map(row => (
+                  <tr key={row.era}>
+                    <td className="configRowLabel">{ERA_LABELS[row.era as keyof typeof ERA_LABELS] ?? row.label}</td>
+                    <td>{row.changeCostGold === null ? "—" : row.changeCostGold.toLocaleString("en-US")}</td>
+                    <td>×{row.costFactor}</td>
+                    <td>+{row.productionBonusPct}%</td>
+                    <td>{row.exploreDiscountGold} oro</td>
+                    <td>{row.unlocks.length > 0 ? row.unlocks.map(k => BUILDING_LABELS[k as ConstructionKind] ?? k).join(", ") : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="configHint">Solo lectura: los buffs de era están fijos en el motor.</p>
+          <footer className="configFooter">
+            <button className="cancelButton" onClick={onClose} type="button">
+              Cerrar
+            </button>
+          </footer>
+        </>
+      )}
+      {configMode === "density" && (
+        <>
+          <div className="configTableWrapper">
+            <table className="configTable">
+              <thead>
+                <tr>
+                  <th>Era</th>
+                  <th>Hab / Tile</th>
+                  <th>Ej. 1 pueblo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ERA_LIST.map(era => (
+                  <tr key={era}>
+                    <td className="configRowLabel">{ERA_LABELS[era as keyof typeof ERA_LABELS] ?? era}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min="0"
+                        value={configDensity[era] ?? 0}
+                        onChange={e => handleDensityChange(era, e.target.value)}
+                        disabled={configLoading}
+                        className="configInput"
+                      />
+                    </td>
+                    <td>{(configDensity[era] ?? 0).toLocaleString("en-US")} hab</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="configHint">Tope = tiles habitables × densidad. Tile sin pueblo/ciudad/reino = 0 hab.</p>
+          <h3 className="configSubTitle">Natalidad y mortalidad por era (solo lectura)</h3>
+          <div className="configTableWrapper">
+            <table className="configTable">
+              <thead>
+                <tr>
+                  <th>Era</th>
+                  <th>Natalidad paz</th>
+                  <th>Natalidad guerra</th>
+                  <th>Mortalidad paz</th>
+                  <th>Mortalidad guerra</th>
+                </tr>
+              </thead>
+              <tbody>
+                {getEraVitalityRows().map(row => (
+                  <tr key={row.era}>
+                    <td className="configRowLabel">{ERA_LABELS[row.era as keyof typeof ERA_LABELS] ?? row.era}</td>
+                    <td>{row.birthPeace}</td>
+                    <td>{row.birthWar}</td>
+                    <td>{row.deathPeace}</td>
+                    <td>{row.deathWar}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="configHint">El exceso sobre el tope puede seguir creciendo pero produce al 10%: mueve colonos o agranda el pueblo.</p>
+          <footer className="configFooter">
+            <button
+              className="saveButton"
+              onClick={onSave}
+              disabled={configLoading}
+              type="button"
+            >
+              {configLoading ? "Guardando..." : "💾 Guardar Densidad"}
+            </button>
+            <button className="cancelButton" onClick={onClose} disabled={configLoading} type="button">
+              Cancelar
+            </button>
+          </footer>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ConstructionQueue({ projects, nations, minasDeCarbon, aserraderos }: { projects: ConstructionProject[]; nations: Nation[]; minasDeCarbon: MinaDeCarbon[]; aserraderos: Aserradero[] }) {
+  const building = projects.filter((p) => p.status === "building");
+  const minasActivas = minasDeCarbon.filter((m) => m.activa);
+  const aserraderosActivos = aserraderos.filter((a) => a.activa);
+  if (building.length === 0 && minasActivas.length === 0 && aserraderosActivos.length === 0) {
+    return <p className="emptyState">Sin obras ni instalaciones activas</p>;
+  }
+  const nameOf = (id: string) => nations.find((n) => n.id === id)?.name ?? id;
+  const provinceName = (id: string) => world.provinceById.get(id)?.name ?? id;
+  return (
+    <div className="eventRows constructionQueue">
+      <div className="sectionTitleRow">
+        <h2>Ingeniería</h2>
+        <span>{building.length + minasActivas.length + aserraderosActivos.length}</span>
+      </div>
+      {building.map((project) => (
+        <article className="eventRow construction ingenieriaEvent" key={project.id}>
+          <div>
+            <strong>🚧 {nameOf(project.nationId)} — {project.kind === "barracks" ? "cuartel" : project.kind === "stable" ? "establo" : project.kind === "mina_carbon" ? "mina de carbón" : project.kind === "aserradero" ? "aserradero" : project.kind === "mina_hierro" ? "mina de hierro" : project.kind === "fabrica_armas" ? "fábrica de armas" : project.kind === "ciudad" ? `ciudad ${project.era}` : project.kind === "reino" ? `reino 👑 ${project.era}` : `pueblo ${project.era}`}</strong>
+            <span>{project.remainingTurns} meses restantes</span>
+          </div>
+          <em className="ingenieriaBadge">🏗️ Construcción</em>
+          <p>{formatConstructionBudget(project.cost)} · provincia {provinceName(project.provinceId)}</p>
+        </article>
+      ))}
+      {minasActivas.map((mina) => (
+        <article className="eventRow construction ingenieriaEvent" key={mina.id}>
+          <div>
+            <strong>⛏️ {nameOf(mina.nationId)} — Mina de Carbón ({mina.era})</strong>
+            <span>Activa · {mina.nivel}ª mina</span>
+          </div>
+          <em className="ingenieriaBadge">⛏️ Mina</em>
+          <p>Producción: ~{Math.floor(100 * (({stone:1.0, ancient:1.1, medieval:1.3, dark_medieval:1.4, modern:1.6, contemporary:2.0} as Record<string,number>)[mina.era] ?? 1))} carbón/turno · Mantenimiento: 5 oro · Provincia {provinceName(mina.provinceId)}</p>
+        </article>
+      ))}
+      {aserraderosActivos.map((aserradero) => (
+        <article className="eventRow construction ingenieriaEvent" key={aserradero.id}>
+          <div>
+            <strong>🪵 {nameOf(aserradero.nationId)} — Aserradero ({aserradero.era})</strong>
+            <span>Activo · {aserradero.nivel}º aserradero</span>
+          </div>
+          <em className="ingenieriaBadge">🪵 Aserradero</em>
+          <p>Producción: ~{Math.floor(100 * (({stone:1.0, ancient:1.1, medieval:1.3, dark_medieval:1.4, modern:1.6, contemporary:2.0} as Record<string,number>)[aserradero.era] ?? 1))} madera/turno · Mantenimiento: 5 oro · Provincia {provinceName(aserradero.provinceId)}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function NationChip({ nationId, nations, configs }: {
+  nationId: string;
+  nations: Nation[];
+  configs: NationModelConfigs;
+}) {
+  const nation = nations.find((n) => n.id === nationId);
+  const iconPath = getModelIconForConfig(configs[nationId]);
+  return (
+    <span className="nationChip">
+      <img
+        src={iconPath}
+        alt=""
+        width="16"
+        height="16"
+        onError={(event) => { event.currentTarget.src = "/resources/models/generic-ai.svg"; }}
+      />
+      <i style={{ backgroundColor: nation?.color ?? "#666" }} />
+      {nation?.name ?? nationId}
+    </span>
+  );
+}
+
+function EventNationChips({ event, nations, configs }: {
+  event: GameEvent;
+  nations: Nation[];
+  configs: NationModelConfigs;
+}) {
+  const ids = event.nationIds;
+  if (ids.length === 0) {
+    return (
+      <span className="nationChips">
+        <span className="nationChip systemChip">📊 Sistema</span>
+      </span>
+    );
+  }
+  // Combate con atacante/defensor garantizado: NaciónA ⚔️ NaciónB.
+  if (event.kind === "battle_fought" && ids.length >= 2) {
+    return (
+      <span className="nationChips">
+        <NationChip nationId={ids[0]} nations={nations} configs={configs} />
+        <b className="vsSeparator">⚔️</b>
+        <NationChip nationId={ids[1]} nations={nations} configs={configs} />
+      </span>
+    );
+  }
+  return (
+    <span className="nationChips">
+      {ids.map((id, index) => (
+        <span key={id} className="nationChipGroup">
+          {index > 0 && <b className="vsSeparator neutral">·</b>}
+          <NationChip nationId={id} nations={nations} configs={configs} />
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function EventRows({ events, nations, configs }: {
+  events: GameEvent[];
+  nations: Nation[];
+  configs: NationModelConfigs;
+}) {
   if (events.length === 0) {
     return <p className="emptyState">No major events yet</p>;
   }
@@ -914,9 +1555,9 @@ function EventRows({ events }: { events: GameEvent[] }) {
   return (
     <div className="eventRows">
       {events.map((event) => (
-        <article className={`eventRow ${event.kind}${isSpyEventKind(event.kind) ? " spyEvent" : ""}${isLogisticsEventKind(event.kind) ? " logisticsEvent" : ""}${isCombatEventKind(event.kind) ? " combatEvent" : ""}${isDiplomacyEventKind(event.kind) ? " diplomaciaEvent" : ""}${isExpansionEventKind(event.kind) ? " expansionesEvent" : ""}`} key={event.id}>
+        <article className={`eventRow ${event.kind}${isSpyEventKind(event.kind) ? " spyEvent" : ""}${isLogisticsEventKind(event.kind) ? " logisticsEvent" : ""}${isCombatEventKind(event.kind) ? " combatEvent" : ""}${isDiplomacyEventKind(event.kind) ? " diplomaciaEvent" : ""}${isExpansionEventKind(event.kind) ? " expansionesEvent" : ""}${isIngenieriaEventKind(event.kind) ? " ingenieriaEvent" : ""}`} key={event.id}>
           <div>
-            <strong>{event.title}</strong>
+            <strong data-lang={event.lang ?? undefined}>{event.title}</strong>
             <span>{formatWorldTime(event.month)}</span>
           </div>
           {isSpyEventKind(event.kind) && <em className="spyBadge">🕵️ Espionaje</em>}
@@ -924,7 +1565,9 @@ function EventRows({ events }: { events: GameEvent[] }) {
           {isCombatEventKind(event.kind) && <em className="combatBadge">⚔️ Combate</em>}
           {isDiplomacyEventKind(event.kind) && <em className="diplomaciaBadge">📜 Diplomacia</em>}
           {isExpansionEventKind(event.kind) && <em className="expansionesBadge">🌍 Expansiones</em>}
-          <p>{event.description}</p>
+          {isIngenieriaEventKind(event.kind) && <em className="ingenieriaBadge">🏗️ Construcción</em>}
+          <EventNationChips event={event} nations={nations} configs={configs} />
+          <p data-lang={event.lang ?? undefined}>{event.description}</p>
         </article>
       ))}
     </div>
@@ -1076,43 +1719,55 @@ function NationDetailPanel({
       </header>
       <div className="statGrid">
         <div>
-          <span>Capital</span>
+          <span>🏛️ Capital</span>
           <strong className="smallStat">{stats.capitalName}</strong>
         </div>
         <div>
-          <span>Cities</span>
-          <strong>{stats.cityCount}</strong>
+          <span>🏙️ Cities</span>
+          <strong>{stats.ciudadCount}</strong>
         </div>
         <div>
-          <span>Population</span>
+          <span>🛖 Towns</span>
+          <strong>{stats.puebloCount}</strong>
+        </div>
+        <div>
+          <span>👥 Population</span>
           <strong className="smallStat">{formatPopulation(stats.cityEconomy.population)}</strong>
         </div>
         <div>
-          <span>Monthly Gold</span>
+          <span>💰 Monthly Gold</span>
           <strong className="smallStat">{formatInteger(stats.cityEconomy.monthlyGold)}/mo</strong>
         </div>
         <div>
-          <span>Treasury</span>
+          <span>🏦 Treasury</span>
           <strong className="smallStat">{formatInteger(stats.stockpile.gold)}</strong>
         </div>
         <div>
-          <span>Soldiers</span>
+          <span>⚔️ Soldiers</span>
           <strong className="smallStat">{formatInteger(stats.military.totalSoldiers)}</strong>
         </div>
         <div>
-          <span>Morale</span>
+          <span>🔥 Morale</span>
           <strong>{Math.round(stats.military.army.morale * 100)}%</strong>
         </div>
         <div>
-          <span>Provinces</span>
+          <span>🗺️ Provinces</span>
           <strong>{stats.provinceCount}</strong>
         </div>
         <div>
-          <span>Resource Sites</span>
+          <span>🟩 Tiles</span>
+          <strong>{formatInteger(stats.tileCount)}</strong>
+        </div>
+        <div>
+          <span>{stats.eraEmoji} Era</span>
+          <strong className="smallStat">{stats.eraLabel}</strong>
+        </div>
+        <div>
+          <span>⛏️ Resource Sites</span>
           <strong>{stats.resourceSiteCount}</strong>
         </div>
         <div>
-          <span>Deployed Spies</span>
+          <span>🕵️ Deployed Spies</span>
           <strong>{stats.spies.deployed.length}/3</strong>
         </div>
       </div>
@@ -1689,14 +2344,6 @@ function formatWorldTime(elapsedMonths: number) {
   return `Year ${year}, Month ${month}`;
 }
 
-function formatPopulation(population: number) {
-  if (population >= 1000000) {
-    return `${(population / 1000000).toFixed(1)}M`;
-  }
-
-  return `${Math.round(population / 1000)}K`;
-}
-
 function formatInteger(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
 }
@@ -1780,6 +2427,7 @@ function buildNationStats(
   military: MilitaryState,
   spies: SpyNetwork,
   elapsedMonths: number,
+  eraStates?: Record<string, EraState>,
 ) {
   if (!nationId) {
     return undefined;
@@ -1798,10 +2446,16 @@ function buildNationStats(
     .sort((a, b) => Number(b.isCapital) - Number(a.isCapital) || b.population - a.population);
   const defeatRecord = defeatedNations[nationId];
   const isDefeated = Boolean(defeatRecord) || isNationDefeated(world, nationId);
+  const puebloCount = cities.filter((city) => (city.tipo ?? "pueblo") === "pueblo").length;
+  const ciudadCount = cities.length - puebloCount;
+  const tileCount = tiles.length;
   const capitalCity =
     (nation.capitalCityId ? world.cityById.get(nation.capitalCityId) : undefined) ??
     cities.find((city) => city.isCapital);
   const capitalName = capitalCity?.name ?? world.provinceById.get(nation.capitalProvinceId)?.name ?? "Unknown";
+  const era = getNationEra(nationId, eraStates ?? {});
+  const eraEmoji = formatEraEmoji(era);
+  const eraLabel = formatEraLabel(era);
   const cityEconomy = calculateNationCityEconomy(nationId, world);
   const monthlyIncome = calculateNationMonthlyIncome(world, nationId);
   const monthlyOutput: ResourceTotals = {};
@@ -1819,7 +2473,13 @@ function buildNationStats(
 
   return {
     capitalName,
+    era,
+    eraEmoji,
+    eraLabel,
     cityCount: cities.length,
+    puebloCount,
+    ciudadCount,
+    tileCount,
     cityEconomy,
     currentResources: stockpile?.resources ?? {},
     defeatRecord,
@@ -1954,7 +2614,10 @@ function useDomLocalization(rootRef: React.RefObject<HTMLElement | null>, langua
     const applyTree = (node: Node, comparisonLanguage = language) => {
       if (node.nodeType === Node.TEXT_NODE) applyText(node as Text, comparisonLanguage);
       if (node.nodeType === Node.ELEMENT_NODE) {
-        applyElement(node as Element, comparisonLanguage);
+        const element = node as Element;
+        // Vía B: eventos generados en el idioma activo no se re-traducen.
+        if (element.hasAttribute?.("data-lang") && element.getAttribute("data-lang") === language) return;
+        applyElement(element, comparisonLanguage);
         node.childNodes.forEach((child) => applyTree(child, comparisonLanguage));
       }
     };
