@@ -6,7 +6,7 @@ import { debug } from "./debugLog";
 import { eraChangeCost, getNationEra, nextEra, checkEraRequirements } from "./era";
 import { densityPerTile, habitableTilesOf } from "./density";
 import { provinceHops } from "./carts";
-import { getFrontierProvinces, isAttackableFrontier } from "./diplomacy";
+import { isAttackableFrontier } from "./diplomacy";
 
 const llmLog = debug.tag("llmExecutor");
 
@@ -41,6 +41,8 @@ export type LLMDecision = {
   acceptCartOfferId?: string;
   traslado?: { fromCityId: string; toCityId: string; colonos: number };
   doctrina?: { ejecutarPct: number };
+  muster?: Array<{ cityId: string; units: Record<string, number>; stance?: string }>;
+  move?: Array<{ groupId: string; destinationProvinceId: string; stance?: string }>;
 };
 
 const decisionMap = new Map<string, LLMDecision>();
@@ -224,9 +226,6 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   const policy = context.simulation.nationPolicies[context.nationId];
   const cities = context.world.cities.filter((c) => c.nationId === context.nationId);
    const provinces = context.world.provinces.filter((p) => p.nationId === context.nationId);
-    const frontierProvinces = context.world.tiles && context.simulation.diplomacy
-      ? getFrontierProvinces(context.nationId, context.world, context.simulation.diplomacy)
-      : [];
    const nationPopulation = cities.reduce((s, c) => s + c.population, 0);
 
   const eraStates = (context.simulation as any).eraState ?? {};
@@ -268,12 +267,21 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   const myStables: Array<{ provinceId: string; carts: number }> = (simAny.aserraderos ?? [])
     .filter((a: any) => a.nationId === context.nationId && a.activa)
     .map((a: any) => ({ provinceId: a.provinceId, carts: a.carts ?? 0 }));
-  const myGroups: Array<{ provinceId: string; foot: number; carts: number }> = ((simAny.military?.[context.nationId]?.armyGroups ?? []) as any[])
-    .map((g: any) => ({
-      provinceId: g.locationProvinceId,
-      foot: (g.units?.militia ?? 0) + (g.units?.infantry ?? 0) + (g.units?.levy ?? 0),
-      carts: g.carts ?? 0,
-    }));
+  const myGroups: Array<{ id: string; provinceId: string; foot: number; carts: number; stance: string; idle: boolean; total: number }> = ((simAny.military?.[context.nationId]?.armyGroups ?? []) as any[])
+    .map((g: any) => {
+      const units = g.units ?? {};
+      const total = ["militia", "infantry", "lightCavalry", "heavyCavalry", "levy", "caballeria"]
+        .reduce((s: number, t: string) => s + (units[t] ?? 0), 0);
+      return {
+        id: g.id,
+        provinceId: g.locationProvinceId,
+        foot: (units.militia ?? 0) + (units.infantry ?? 0) + (units.levy ?? 0),
+        carts: g.carts ?? 0,
+        stance: g.stance ?? "?",
+        idle: (g.pathProvinceIds ?? []).length === 0,
+        total,
+      };
+    });
   const cartNeedByProvince: Record<string, number> = {};
   for (const g of myGroups) {
     cartNeedByProvince[g.provinceId] = (cartNeedByProvince[g.provinceId] ?? 0) + Math.max(0, Math.ceil(g.foot / 50) - g.carts);
@@ -285,6 +293,18 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     .filter((o: any) => o.targetNationId === context.nationId)
     .map((o: any) => `${o.id} (from ${o.sellerNationId}: ${o.carts} carts @ ${o.pricePerCart} gold each)`)
     .join("; ") || "none";
+  const groupStatus = myGroups.length === 0
+    ? "none"
+    : myGroups.map((g) => `${g.id} @${g.provinceId} (${g.total} troops, ${g.stance}, ${g.idle ? "idle" : "marching"})`).join("; ");
+  // Movible por ciudad = guarnición − reserva (22 + 12×nivel + 32 si capital, ver war.ts).
+  const garrison = ((simAny.military?.[context.nationId]?.cityGarrisons ?? {}) as Record<string, any>);
+  const musterStatus = cities.map((c) => {
+    const gar = garrison[c.id] ?? {};
+    const total = ["militia", "infantry", "lightCavalry", "heavyCavalry", "levy", "caballeria"]
+      .reduce((s: number, t: string) => s + (gar[t] ?? 0), 0);
+    const reserve = 22 + (c.level ?? 1) * 12 + (c.isCapital ? 32 : 0);
+    return `${c.id} (${c.name}: movable ${Math.max(0, total - reserve)}/${total})`;
+  }).join("; ");
 
   // Sobrepoblación por ciudad: quedarse sobre el tope baja la producción
   // (piso 10%). La IA decide si trasladar ponderando estos números.
@@ -310,6 +330,29 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     return `${r.c.id} → ${dests || "no room"}`;
   }).join("; ");
 
+  // Provincias enemigas atacables (de otro dueño, adyacentes a territorio propio).
+  const attackableProvinces: Array<{ id: string; name: string; owner: string }> = [];
+  if (context.world.tiles) {
+    const ownTileCoords = new Set(
+      context.world.tiles
+        .filter((t) => {
+          const p = t.provinceId ? context.world.provinceById.get(t.provinceId) : undefined;
+          return p?.nationId === context.nationId;
+        })
+        .map((t) => `${t.x},${t.y}`),
+    );
+    const seenAttackable = new Set<string>();
+    for (const tile of context.world.tiles) {
+      const prov = tile.provinceId ? context.world.provinceById.get(tile.provinceId) : undefined;
+      if (!prov || !prov.nationId || prov.nationId === context.nationId || seenAttackable.has(prov.id)) continue;
+      const bordersOwn = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) =>
+        ownTileCoords.has(`${tile.x + dx},${tile.y + dy}`),
+      );
+      if (!bordersOwn) continue;
+      seenAttackable.add(prov.id);
+      attackableProvinces.push({ id: prov.id, name: prov.nameEs ?? prov.name ?? prov.id, owner: prov.nationId });
+    }
+  }
   return [
     `You are the national decision maker of ${nation?.name ?? context.nationId} (id=${context.nationId}).`,
     `Turn: ${context.turnNumber}`,
@@ -366,11 +409,16 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     ``,
      `Current policies: Expansion=${policy?.expansion?.policy ?? "unknown"}, Economy=${policy?.economy?.policy ?? "unknown"}, Diplomacy=${policy?.diplomacy?.policy ?? "unknown"}, Era=${(policy as any)?.era?.policy ?? "stay"}`,
      ``,
-     `Frontier provinces (yours, bordering enemies) — ONLY these can be attacked:`,
-     frontierProvinces.length > 0
-       ? frontierProvinces.map((p) => `    - ${p.id} (${p.name ?? "unknown"})`).join("\n")
+     `Enemy frontier provinces (theirs, bordering yours) — ONLY these can be attacked via "targetProvinceId":`,
+     attackableProvinces.length > 0
+       ? attackableProvinces.map((p) => `    - ${p.id} (${p.name ?? "unknown"}, owner=${p.owner})`).join("\n")
        : "    none",
      `Use "targetProvinceId" with "declare_war"/"control_city"/"decisive_battle" to attack a frontier province. Omit or null for automated targeting.`,
+     ``,
+     `Your army groups: ${groupStatus}`,
+     `Garrisons ready to muster (cityId, movable/total troops): ${musterStatus}`,
+     `  "muster":[{"cityId":"...","units":{"militia":30},"stance":"attack"}]: form an army group from that city's garrison (amounts within movable, total >= 25, stance optional attack/defend/garrison/rally/raid/retreat). Omit or null for automated mustering.`,
+     `  "move":[{"groupId":"...","destinationProvinceId":"...","stance":"attack"}]: redirect any group (idle or marching, path recomputed from its position, stance optional). Invalid orders are rejected with a reason. Omit or null to keep automated movement.`,
      ``,
      `EXAMPLES of valid JSON responses:`,
     `  When neutral territory is available: {"expansion":"peaceful_expand","economy":"construction","diplomacy":"none","targetNationId":null,"rationale":"Colonizing neutral territory to grow peacefully"}`,
@@ -378,7 +426,7 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `  When no expansion needed: {"expansion":"none","economy":"construction","diplomacy":"seek_alliance","era":"stay","targetNationId":null,"rationale":"Building infrastructure and alliances"}`,
     ``,
     "Respond ONLY with valid JSON, no explanation, no analysis, no reasoning text:",
-     '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","targetProvinceId":"frontier_province_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null}',
+     '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","targetProvinceId":"frontier_province_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null,"muster":null,"move":null}',
   ].join("\n");
 }
 
@@ -421,6 +469,8 @@ export function parseDecision(raw: string): LLMDecision | null {
       acceptCartOfferId: typeof parsed.acceptCartOfferId === "string" ? parsed.acceptCartOfferId : undefined,
       traslado: normalizeTraslado(parsed.traslado),
       doctrina: normalizeDoctrina(parsed.doctrina),
+      muster: normalizeMuster(parsed.muster),
+      move: normalizeMove(parsed.move),
     };
   } catch {
     const extract = (key: string): string | null => {
@@ -475,6 +525,44 @@ function normalizeDoctrina(value: unknown): LLMDecision["doctrina"] {
   const pct = Math.floor(Number(v.ejecutarPct));
   if (!Number.isFinite(pct)) return undefined;
   return { ejecutarPct: Math.max(0, Math.min(100, pct)) };
+}
+
+const MUSTER_UNITS = ["militia", "infantry", "lightCavalry", "heavyCavalry", "levy", "caballeria"];
+const ORDER_STANCES = ["attack", "defend", "garrison", "rally", "raid", "retreat"];
+
+function normalizeStance(value: unknown): string | undefined {
+  return typeof value === "string" && ORDER_STANCES.includes(value) ? value : undefined;
+}
+
+function normalizeMuster(value: unknown): LLMDecision["muster"] {
+  if (!Array.isArray(value)) return undefined;
+  const out: NonNullable<LLMDecision["muster"]> = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const v = item as Record<string, unknown>;
+    if (typeof v.cityId !== "string") continue;
+    const units: Record<string, number> = {};
+    const raw = (v.units ?? {}) as Record<string, unknown>;
+    for (const u of MUSTER_UNITS) {
+      const n = Math.floor(Number(raw[u]));
+      if (Number.isFinite(n) && n > 0) units[u] = n;
+    }
+    if (Object.keys(units).length === 0) continue;
+    out.push({ cityId: v.cityId, units, stance: normalizeStance(v.stance) });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function normalizeMove(value: unknown): LLMDecision["move"] {
+  if (!Array.isArray(value)) return undefined;
+  const out: NonNullable<LLMDecision["move"]> = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const v = item as Record<string, unknown>;
+    if (typeof v.groupId !== "string" || typeof v.destinationProvinceId !== "string") continue;
+    out.push({ groupId: v.groupId, destinationProvinceId: v.destinationProvinceId, stance: normalizeStance(v.stance) });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext): void {
@@ -563,12 +651,16 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
     acceptCartOfferId?: string;
     traslado?: LLMDecision["traslado"];
     doctrina?: LLMDecision["doctrina"];
+    musterOrders?: LLMDecision["muster"];
+    moveOrders?: LLMDecision["move"];
   };
   cartPolicy.cartMove = decision.cartMove;
   cartPolicy.cartOffer = decision.cartOffer;
   cartPolicy.acceptCartOfferId = decision.acceptCartOfferId;
   cartPolicy.traslado = decision.traslado;
   cartPolicy.doctrina = decision.doctrina;
+  cartPolicy.musterOrders = decision.muster;
+  cartPolicy.moveOrders = decision.move;
 
   // NO inventar eventos war_declared aquí: la guerra real la crea
   // executeDiplomacyPoliciesWithEvents en resolveTurn a partir de nationPolicies.

@@ -66,7 +66,7 @@ import { getLiveMaintenanceCosts } from "./constructionConfig";
 import { buildInitialChatState, type ChatState } from "./chat";
 import { enforceProvinceMilitaryLimits, handleDeserters } from "./provinceLimits";
 import type { World } from "./types";
-import { advanceArmyGroups, advanceMilitaryEconomy, advanceWarSystem, buildInitialMilitaryState, type MilitaryState } from "./war";
+import { advanceArmyGroups, advanceMilitaryEconomy, advanceWarSystem, buildInitialMilitaryState, type LlmArmyOrders, type MilitaryState, type MoveOrder, type MusterOrder } from "./war";
 
 export type GameOverRecord = {
   victorNationId: string;
@@ -1470,7 +1470,17 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
   const peacefulResult = executePeacefulExpansion(world, nationPolicies, nationStockpiles, nextMonth, provinceBuildings, current.eraState, lang);
   const peacefulEvents = peacefulResult.events;
   const peacefulMapChanged = peacefulResult.mapChanged;
-  const movementUpdate = advanceArmyGroups(world, evaluation.diplomacy, militaryEconomy.military, nextMonth, militaryEconomy.stockpiles, provinceBuildings, lang);
+  // Órdenes LLM one-shot de ejército (se consumen este turno).
+  const armyOrdersByNation: Record<string, LlmArmyOrders | undefined> = {};
+  for (const nation of world.nations) {
+    const sidecar = nationPolicies[nation.id] as unknown as { musterOrders?: MusterOrder[]; moveOrders?: MoveOrder[] } | undefined;
+    if (sidecar?.musterOrders !== undefined || sidecar?.moveOrders !== undefined) {
+      armyOrdersByNation[nation.id] = { muster: sidecar.musterOrders, move: sidecar.moveOrders };
+      sidecar.musterOrders = undefined;
+      sidecar.moveOrders = undefined;
+    }
+  }
+  const movementUpdate = advanceArmyGroups(world, evaluation.diplomacy, militaryEconomy.military, nextMonth, militaryEconomy.stockpiles, provinceBuildings, lang, armyOrdersByNation);
   const warUpdate = advanceWarSystem(world, evaluation.diplomacy, movementUpdate.military, spyUpdate.relations, spyUpdate.spyNetwork, militaryEconomy.stockpiles, nextMonth, indexFabricas(current.fabricasArmas ?? []), {
     minasDeCarbon: current.minasDeCarbon ?? [],
     minasDeHierro: current.minasDeHierro ?? [],

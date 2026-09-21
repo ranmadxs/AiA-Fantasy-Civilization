@@ -375,6 +375,7 @@ export function advanceArmyGroups(
   stockpiles?: NationStockpiles,
   provinceBuildings?: ProvinceBuildings,
   lang?: EventLang,
+  ordersByNation?: Record<string, LlmArmyOrders | undefined>,
 ): MilitaryMovementUpdate {
   const events: GameEvent[] = [];
   let mapChanged = false;
@@ -399,7 +400,7 @@ export function advanceArmyGroups(
       army.lastArmyCommandMonth === undefined ||
       currentMonth - army.lastArmyCommandMonth >= armyCommandIntervalMonths
     ) {
-      const commandResult = issueArmyCommands(world, diplomacy, army, currentMonth, stockpiles, lang);
+      const commandResult = issueArmyCommands(world, diplomacy, army, currentMonth, stockpiles, lang, ordersByNation?.[nation.id]);
       army = commandResult.army;
       army.lastArmyCommandMonth = currentMonth;
       events.push(...commandResult.events);
@@ -1327,13 +1328,36 @@ function emptyResourceCosts() {
   } satisfies Record<Resource, number>;
 }
 
-function issueArmyCommands(
+/** Evento de orden LLM rechazada (el motor sigue con lo automático). */
+function deniedOrderEvent(
+  world: World,
+  nationId: string,
+  currentMonth: number,
+  what: string,
+  reason: string,
+  lang?: EventLang,
+): GameEvent {
+  return buildWarEvent({
+    currentMonth,
+    description: ev(lang,
+      `${nationName(world, nationId)} ordered ${what} but it was rejected: ${reason}.`,
+      `${nationNameL(world, nationId, lang)} ordenó ${what} pero fue rechazada: ${reason}.`),
+    id: `event-order-rejected-${nationId}-${what}-${currentMonth}`,
+    kind: "army_group_ordered",
+    nationIds: [nationId],
+    title: ev(lang, "Order Rejected", "Orden Rechazada"),
+    ...(lang ? { lang } : {}),
+  });
+}
+
+export function issueArmyCommands(
   world: World,
   diplomacy: DiplomacyState,
   army: NationMilitary,
   currentMonth: number,
   stockpiles?: NationStockpiles,
   lang?: EventLang,
+  orders?: LlmArmyOrders,
 ) {
   let nextArmy = cloneArmy(army);
   const events: GameEvent[] = [];
@@ -1342,12 +1366,58 @@ function issueArmyCommands(
     war.attackerNationId === army.nationId || war.defenderNationId === army.nationId,
   );
 
+  // Órdenes LLM one-shot (paz y guerra): el LLM manda, el motor valida.
+  // Van ANTES del flujo automático y los grupos recién tocados no se
+  // reasignan en el mismo turno (updatedAtMonth), así la orden gana.
+  if (orders?.muster) {
+    for (const order of orders.muster) {
+      const check = validateMusterOrder(world, nextArmy, order);
+      if (!check.ok) {
+        events.push(deniedOrderEvent(world, army.nationId, currentMonth, "muster", check.reason ?? "inválida", lang));
+        continue;
+      }
+      const formed = formGroupFromCity(world, nextArmy, order, currentMonth, "llm", lang);
+      nextArmy = formed.army;
+      if (formed.event) {
+        events.push(formed.event);
+        mapChanged = true;
+      }
+    }
+  }
+  if (orders?.move) {
+    for (const order of orders.move) {
+      const check = validateMoveOrder(world, nextArmy, order, diplomacy);
+      const group = nextArmy.armyGroups.find((g) => g.id === order.groupId);
+      if (!check.ok || !group || !check.path) {
+        events.push(deniedOrderEvent(world, army.nationId, currentMonth, "move", check.reason ?? "inválida", lang));
+        continue;
+      }
+      group.destinationProvinceId = order.destinationProvinceId;
+      group.objectiveProvinceId = order.destinationProvinceId;
+      group.pathProvinceIds = check.path.slice(1);
+      if (order.stance !== undefined) group.stance = order.stance;
+      group.updatedAtMonth = currentMonth;
+      mapChanged = true;
+      events.push(buildWarEvent({
+        currentMonth,
+        description: ev(lang,
+          `${nationName(world, army.nationId)} redirected an army group toward ${world.provinceById.get(order.destinationProvinceId)?.name ?? order.destinationProvinceId} (LLM decision).`,
+          `${nationNameL(world, army.nationId, lang)} redirigió un grupo de ejército hacia ${provinceNameL(world, order.destinationProvinceId, lang)} (decisión LLM).`),
+        id: `event-army-group-ordered-${group.id}-${currentMonth}`,
+        kind: "army_group_ordered",
+        nationIds: [army.nationId],
+        title: ev(lang, "Army Group Ordered", "Grupo de Ejército Ordenado"),
+        ...(lang ? { lang } : {}),
+      }));
+    }
+  }
+
   if (wars.length === 0) {
     const merge = mergeArmyGroups(nextArmy, currentMonth, lang);
     return {
-      events: merge.events,
+      events: [...events, ...merge.events],
       army: merge.army,
-      mapChanged: merge.mapChanged,
+      mapChanged: mapChanged || merge.mapChanged,
     };
   }
 
@@ -1645,6 +1715,133 @@ function settleDeserters(world: World, nationId: string, count: number) {
   }
 }
 
+/** Órdenes de ejército del LLM (one-shot por turno). */
+export type MusterOrder = {
+  cityId: string;
+  units: Partial<Record<UnitType, number>>;
+  stance?: ArmyStance;
+};
+
+export type MoveOrder = {
+  groupId: string;
+  destinationProvinceId: string;
+  stance?: ArmyStance;
+};
+
+export type LlmArmyOrders = {
+  muster?: MusterOrder[];
+  move?: MoveOrder[];
+};
+
+const VALID_STANCES: ArmyStance[] = ["attack", "defend", "garrison", "rally", "raid", "retreat"];
+
+/** Valida formar grupo: ciudad propia, montos sanos, dentro de lo movible sobre reserva y ≥ mínimo útil. */
+export function validateMusterOrder(
+  world: World,
+  army: NationMilitary,
+  order: MusterOrder,
+): { ok: boolean; reason?: string; total?: number } {
+  const city = world.cityById.get(order.cityId);
+  if (!city || city.nationId !== army.nationId) {
+    return { ok: false, reason: "ciudad ajena o inexistente" };
+  }
+  if (order.stance !== undefined && !VALID_STANCES.includes(order.stance)) {
+    return { ok: false, reason: "stance inválido" };
+  }
+  const garrison = army.cityGarrisons[city.id] ?? emptyUnits();
+  let total = 0;
+  for (const [type, amount] of Object.entries(order.units ?? {})) {
+    if (!unitTypes.includes(type as UnitType)) return { ok: false, reason: `unidad desconocida: ${type}` };
+    if (!Number.isFinite(amount) || (amount ?? 0) < 0) return { ok: false, reason: "monto inválido" };
+    const want = Math.floor(amount ?? 0);
+    if (want > (garrison[type as UnitType] ?? 0)) return { ok: false, reason: `supera guarnición: ${type}` };
+    total += want;
+  }
+  if (total <= 0) return { ok: false, reason: "orden vacía" };
+  const movable = Math.max(0, totalUnits(garrison) - cityReserveTarget(city));
+  if (total > movable) return { ok: false, reason: `supera reserva (${movable} movibles)` };
+  if (total < MIN_GROUP_SIZE) return { ok: false, reason: `bajo mínimo ${MIN_GROUP_SIZE}` };
+  return { ok: true, total };
+}
+
+/** Forma un grupo quieto en su ciudad con las tropas exactas pedidas. */
+export function formGroupFromCity(
+  world: World,
+  army: NationMilitary,
+  order: MusterOrder,
+  currentMonth: number,
+  origin: "llm" | "auto" = "auto",
+  lang?: EventLang,
+): { army: NationMilitary; event?: GameEvent } {
+  const check = validateMusterOrder(world, army, order);
+  if (!check.ok) return { army };
+  const city = world.cityById.get(order.cityId)!;
+  const nextArmy = cloneArmy(army);
+  const garrison = nextArmy.cityGarrisons[city.id] ?? emptyUnits();
+  const take: ArmyUnits = { ...emptyUnits() };
+  for (const [type, amount] of Object.entries(order.units ?? {})) {
+    const want = Math.floor(amount ?? 0);
+    if (want <= 0) continue;
+    take[type as UnitType] = want;
+    garrison[type as UnitType] = Math.max(0, (garrison[type as UnitType] ?? 0) - want);
+  }
+  nextArmy.cityGarrisons[city.id] = garrison;
+  const stance = order.stance ?? "garrison";
+  const group: ArmyGroup = {
+    createdAtMonth: currentMonth,
+    destinationProvinceId: city.provinceId,
+    id: `army-group-${army.nationId}-${city.id}-${currentMonth}-${army.armyGroups.length}`,
+    locationProvinceId: city.provinceId,
+    movementProgress: 0,
+    nationId: army.nationId,
+    objectiveProvinceId: city.provinceId,
+    originCityId: city.id,
+    originProvinceId: city.provinceId,
+    pathProvinceIds: [],
+    stance,
+    units: take,
+    updatedAtMonth: currentMonth,
+  };
+  nextArmy.armyGroups.push(group);
+  const originNote = origin === "llm" ? " (decisión LLM)." : " (automático).";
+  const originNoteEn = origin === "llm" ? " (LLM decision)." : " (automatic).";
+  return {
+    army: recalculateNationUnits(nextArmy),
+    event: buildWarEvent({
+      currentMonth,
+      description: ev(lang,
+        `${nationName(world, army.nationId)} mustered an army group for ${formatArmyStance(stance)} in ${city.name} (${check.total} soldiers)${originNoteEn}`,
+        `${nationNameL(world, army.nationId, lang)} reunió un grupo de ejército para ${stanceLabelL(stance, lang)} en ${cityNameL(world, city.id, lang)} (${check.total} soldados)${originNote}`),
+      id: `event-army-group-created-${group.id}`,
+      kind: "army_group_created",
+      nationIds: [army.nationId],
+      title: ev(lang, "Army Group Created", "Grupo de Ejército Creado"),
+      ...(lang ? { lang } : {}),
+    }),
+  };
+}
+
+/** Valida redirigir: grupo propio existente, destino válido con camino, stance válido. */
+export function validateMoveOrder(
+  world: World,
+  army: NationMilitary,
+  order: MoveOrder,
+  diplomacy?: DiplomacyState,
+): { ok: boolean; reason?: string; path?: string[] } {
+  const group = army.armyGroups.find((g) => g.id === order.groupId);
+  if (!group || group.nationId !== army.nationId) {
+    return { ok: false, reason: "grupo ajeno o inexistente" };
+  }
+  const dest = world.provinceById.get(order.destinationProvinceId);
+  if (!dest) return { ok: false, reason: "destino inexistente" };
+  if (order.stance !== undefined && !VALID_STANCES.includes(order.stance)) {
+    return { ok: false, reason: "stance inválido" };
+  }
+  const path = findProvincePath(world, army.nationId, group.locationProvinceId, order.destinationProvinceId, diplomacy);
+  if (path.length <= 1) return { ok: false, reason: "sin camino al destino" };
+  return { ok: true, path };
+}
+
 export function orderArmyGroupsTowardObjective(
   world: World,
   army: NationMilitary,
@@ -1662,9 +1859,11 @@ export function orderArmyGroupsTowardObjective(
 
   for (const group of nextArmy.armyGroups) {
     const groupProvince = world.provinceById.get(group.locationProvinceId);
+    // Recién tocado este turno (orden LLM): no reasignar, la orden gana.
     const canRetask =
       group.pathProvinceIds.length === 0 &&
-      groupProvince?.nationId === army.nationId;
+      groupProvince?.nationId === army.nationId &&
+      group.updatedAtMonth !== currentMonth;
     if (
       totalUnits(group.units) < 25 ||
       (group.stance === "retreat" && groupProvince?.nationId !== army.nationId)
@@ -1952,7 +2151,7 @@ function transitPenalty(
   if (ownerNationId === undefined) {
     return 4;
   }
-  if (diplomacy?.alliances.some((alliance) =>
+  if ((diplomacy?.alliances ?? []).some((alliance) =>
     relationKey(alliance.nationAId, alliance.nationBId) === relationKey(nationId, ownerNationId))) {
     return 2;
   }

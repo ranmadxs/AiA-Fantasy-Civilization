@@ -8,8 +8,8 @@
 | `era` (advance_era/skip_dark/stay) | ✅ Sí | — | ✅ Cada 2 meses |
 | `cartMove` (traslado entre provincias) | ✅ Sí | — | ❌ No |
 | Provincia objetivo a atacar (`targetProvinceId`) | ✅ Sí (validada: enemiga en guerra + atacable, con fallback automático) | ✅ `pickTargetProvince` (score frontera) | ✅ Automático |
-| Tropas por provincia (asignación) | ❌ | ✅ `createArmyGroupFromBestCity` | ❌ No |
-| Movimiento de tropas | ❌ | ✅ `moveArmyGroups` | ❌ No |
+| Tropas por provincia (`muster: ciudad + tropas`) | ✅ Sí (validado: guarnición sobre reserva, mín 25) | ✅ Automático (mejor ciudad, 62% sobre reserva) | ✅ Automático |
+| Movimiento de tropas (`move: grupo + destino`) | ✅ Sí (cualquiera, camino recalculado, stance opcional) | ✅ Automático (quietos + mismo objetivo) | ✅ Automático |
 | Stance (attack/defend/garrison) | ❌ | ✅ Automático | ❌ No |
 | `declare_war` (dispara guerra) | ✅ Sí | — | ✅ Cada 2 meses |
 | Cantidad de ejército (policy) | ✅ Sí | — | ✅ Cada 2 meses |
