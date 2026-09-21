@@ -10,7 +10,7 @@
 | 6 | Calcula costo escalado: `peacefulExpandCostFor(n, fromStable, eraDiscount)` | — | ✅ | — |
 | 7 | Si `gold < cost` → salta provincia | — | ✅ | ✅ Cada 2 meses (policy) |
 | 8 | `province.nationId = nationId` — cambia dueño | — | ✅ | — |
-| 9 | Propaga `nationId` a ciudades existentes en la provincia | — | ✅ | — |
+| 9 | `annexProvinceCities`: solo ciudades **sin nación activa** cambian de dueño (+ evento `Anexión pacífica`); las de naciones activas se respetan y sus tiles se excluyen | — | ✅ | — |
 | 10 | `nationStockpile.gold -= cost` | — | ✅ | — |
 | 11 | `reserveTiles()` — reserva tiles para construcción | — | ✅ | — |
 | 12 | Genera evento `peaceful_expand — colonizó X por Y oro` | — | ✅ | — |
