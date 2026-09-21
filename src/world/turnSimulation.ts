@@ -15,7 +15,7 @@ import {
   type MarketState,
 } from "./market";
 import { buildInitialCurrencyState, type CurrencyState } from "./currency";
-import { buildInitialEraStates, eraCostFactor, eraChangeCost, eraProductionBonus, eraTransitionTarget, getNationEra, isKindUnlockedByEra, nextEra, type EraState, ERA_CONFIGS } from "./era";
+import { buildInitialEraStates, eraCostFactor, eraChangeCost, eraProductionBonus, eraTransitionTarget, getNationEra, isKindUnlockedByEra, nextEra, checkEraRequirements, type EraState, ERA_CONFIGS } from "./era";
 import {
   canAffordFirstQuota,
   caravanaOutcome,
@@ -351,7 +351,21 @@ export function advanceConstruction(
     const skipped = eraPolicy.policy === "skip_dark";
     const cost = eraChangeCost(upcoming);
     const stock = stockpiles[nation.id];
-    if ((stock?.gold ?? 0) >= cost) {
+    // Requisitos no-oro primero (pueblos/vivos/reinos; skip_dark valida los de modern).
+    const reqResult = checkEraRequirements(upcoming, world, nation.id, reinos);
+    if (!reqResult.met) {
+      // 🚫 requisitos incumplidos (1 vez por episodio de 6 meses, sin descontar oro).
+      if (!recentEvent((e) => e.id === `event-era-requirements-${nation.id}`, 6)) {
+        events.push({
+          id: `event-era-requirements-${nation.id}`,
+          month: nextMonth,
+          kind: "era",
+          title: "🚫 Requisitos de era no cumplidos",
+          description: `${nation.name} no puede avanzar a la era ${upcoming}: ${reqResult.faltan.join("; ")}.`,
+          nationIds: [nation.id],
+        });
+      }
+    } else if ((stock?.gold ?? 0) >= cost) {
       stock.gold -= cost;
       nextEraState = {
         ...nextEraState,

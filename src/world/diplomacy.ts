@@ -10,7 +10,7 @@ import { eraExploreDiscount, getNationEra } from "./era";
 import type { EraState } from "./era";
 import { getNationRelation, relationKey, type NationRelations } from "./relationships";
 import type { Resource, World } from "./types";
-import { ev, nationNameL, type EventLang } from "./eventText";
+import { ev, nationNameL, provinceNameL, type EventLang } from "./eventText";
 
 export type WarState = {
   id: string;
@@ -616,6 +616,28 @@ function canDeclareWar(
   );
 }
 
+/** Anexión pacífica de ciudades: solo cambian de dueño las que están
+ * en la provincia anexada y cuya nación NO está activa (sin dueño con
+ * quien pelear). Las de naciones activas requieren guerra y se respetan. */
+export function annexProvinceCities(
+  world: World,
+  provinceId: string,
+  nationId: string,
+): { flipped: string[]; skipped: string[] } {
+  const flipped: string[] = [];
+  const skipped: string[] = [];
+  for (const city of world.cities) {
+    if (city.provinceId !== provinceId || city.nationId === nationId) continue;
+    if (isNationActive(world, city.nationId)) {
+      skipped.push(city.id);
+      continue;
+    }
+    city.nationId = nationId;
+    flipped.push(city.id);
+  }
+  return { flipped, skipped };
+}
+
 export function executePeacefulExpansion(
   world: World,
   policies: NationPolicies,
@@ -637,10 +659,16 @@ export function executePeacefulExpansion(
     const nationStockpile = stockpiles[nationId] ?? {gold: 0, water: 0, resources: {}};
     const adjacentTiles = getAdjacentTiles(world, nationId);
     // Solo territorio neutral: robar provincias enemigas requiere guerra (war.ts).
+    // Se excluyen tiles de provincias con ciudades de naciones activas: eso
+    // sí tendría con quién pelear y no entra por vía pacífica.
     let expandableTiles = adjacentTiles.filter((tile) => {
       const province = tile.provinceId ? world.provinceById.get(tile.provinceId) : undefined;
       if (!province) return false;
-      return province.nationId === undefined;
+      if (province.nationId !== undefined) return false;
+      const hasActiveForeignCity = world.cities.some(
+        (c) => c.provinceId === province.id && c.nationId !== nationId && isNationActive(world, c.nationId),
+      );
+      return !hasActiveForeignCity;
     });
 
     if (expandableTiles.length === 0) {
@@ -676,6 +704,26 @@ export function executePeacefulExpansion(
       if (nationStockpile.gold < scaledGold) continue;
 
       province.nationId = nationId;
+      // Anexión pacífica: las ciudades sin nación activa pasan al colonizador
+      // (no hay con quién pelear); las de naciones activas se respetan.
+      const annexed = annexProvinceCities(world, province.id, nationId);
+      if (annexed.flipped.length > 0) {
+        const names = annexed.flipped.map((id) => {
+          const c = world.cityById.get(id);
+          return c ? ev(lang, c.name, c.nameEs ?? c.name) : id;
+        });
+        events.push({
+          id: `event-peaceful-annex-${province.id}-${nationId}-${currentMonth}`,
+          month: currentMonth,
+          kind: "peaceful_expand",
+          title: ev(lang, "Peaceful Annexation", "Anexión pacífica"),
+          description: ev(lang,
+            `${nationNameL(world, nationId, lang)} peacefully annexed ${names.join(", ")} in ${provinceNameL(world, province.id, lang)} (no owner to fight).`,
+            `${nationNameL(world, nationId, lang)} anexó pacíficamente ${names.join(", ")} en ${provinceNameL(world, province.id, lang)} (sin dueño con quien pelear).`),
+          nationIds: [nationId],
+          ...(lang ? { lang } : {}),
+        });
+      }
       nationStockpile.gold -= scaledGold;
       rebuildNationEdges(world);
       (world as any).mapRevision = ((world as any).mapRevision || 0) + 1;
@@ -856,6 +904,31 @@ function buildDiplomacyEvent({
 
 function nationName(world: World | undefined, nationId: string) {
   return world?.nationById.get(nationId)?.name ?? nationId;
+}
+
+/**
+ * Devuelve las provincias fronterizas de una nación:
+ * provincias propias que colindan con al menos una provincia enemiga.
+ * Solo estas pueden ser atacadas por el LLM.
+ */
+export function getFrontierProvinces(nationId: string, world: World, diplomacy: DiplomacyState): World["provinces"] {
+  const adjacency = buildProvinceAdjacency(world);
+  const enemyNationIds = new Set<string>();
+  for (const war of diplomacy.wars) {
+    if (war.attackerNationId === nationId) enemyNationIds.add(war.defenderNationId);
+    else if (war.defenderNationId === nationId) enemyNationIds.add(war.attackerNationId);
+  }
+  if (enemyNationIds.size === 0) return [];
+
+  return world.provinces.filter((p) => {
+    if (p.nationId !== nationId) return false;
+    const neighbors = adjacency.get(p.id) ?? new Set();
+    for (const neighborId of neighbors) {
+      const neighbor = world.provinceById.get(neighborId);
+      if (neighbor && neighbor.nationId && enemyNationIds.has(neighbor.nationId)) return true;
+    }
+    return false;
+  });
 }
 
 function capitalize(value: string) {

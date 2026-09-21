@@ -219,6 +219,16 @@ describe("era como buff (costos base × factor)", () => {
       gold: 100000, water: 100000,
       resources: { grain: 0, timber: 0, iron: 0, coal: 0, oil: 0 },
     };
+    // Requisito stone→ancient: 15 pueblos.
+    const prov = world.provinces.find((p) => p.nationId === nationId)!;
+    const have = world.cities.filter((c) => c.nationId === nationId && (c.tipo ?? "pueblo") === "pueblo").length;
+    for (let i = have; i < 15; i += 1) {
+      world.cities.push({
+        id: `pc-era-${i}`, name: `PE${i}`, nameEn: `PE${i}`, nameZh: `PE${i}`, nameEs: `PE${i}`, nameId: `pe${i}`,
+        nationId, provinceId: prov.id, x: 0, y: 0, isCapital: false,
+        population: 100, level: 1, tipo: "pueblo", tiles: 1,
+      } as any);
+    }
     simulation.nationPolicies[nationId].economy.policy = "recovery";
     simulation.nationPolicies[nationId].era = {
       policy: "advance_era", label: "Advance Era", rationale: "test",

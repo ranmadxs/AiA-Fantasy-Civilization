@@ -36,6 +36,7 @@ export type PolicyDirection<TPolicy extends string> = {
   label: string;
   rationale: string;
   targetNationId?: string;
+  targetProvinceId?: string;
   targetResource?: Resource;
   decidedAtMonth?: number;
   nextDecisionMonth?: number;

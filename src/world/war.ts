@@ -3,10 +3,12 @@ import { densityPerTile, habitableTilesOf } from "./density";
 import { maxLevelOf } from "./levelCaps";
 import { calculateProvinceMilitaryLimit, getAvailableArmySize, hasCitiesForArmy } from "./provinceLimits";
 import { at } from "./rngService";
+import { getFrontierProvinces } from "./diplomacy";
 import type { DiplomacyState, WarState } from "./diplomacy";
 import type { GameEvent } from "./events";
 import { isNationActive, isNationDefeated } from "./nationStatus";
 import type { NationPolicies, NationPolicyState } from "./policyAI";
+import { getDecisionLog } from "./llmExecutor";
 import {
   adjustNationRelation,
   getNationRelation,
@@ -1353,9 +1355,28 @@ function issueArmyCommands(
   for (const war of wars) {
     const enemyNationId = war.attackerNationId === army.nationId ? war.defenderNationId : war.attackerNationId;
     const counterattack = currentMonth - war.startedAtMonth >= 12;
-    const attackTarget = war.attackerNationId === army.nationId || counterattack
-      ? pickTargetProvince(world, army.nationId, enemyNationId)
-      : pickDefensiveProvince(world, army.nationId, enemyNationId);
+
+    // Verificar si el LLM decidió una provincia objetivo específica
+    const llmDecision = getDecisionLog().get(`${army.nationId}_turn_${currentMonth}`);
+    const llmTargetProvinceId = llmDecision?.targetProvinceId || undefined;
+    const isOffensive = war.attackerNationId === army.nationId || counterattack;
+
+    let attackTarget;
+    if (isOffensive && llmTargetProvinceId) {
+      const targetProvince = world.provinceById.get(llmTargetProvinceId);
+      // Validar que la provincia pertenezca al enemigo y sea fronteriza
+      if (targetProvince && targetProvince.nationId === enemyNationId) {
+         const frontierProvinces = getFrontierProvinces(army.nationId, world, diplomacy);
+        if (frontierProvinces.some((fp) => fp.id === llmTargetProvinceId)) {
+          attackTarget = targetProvince;
+        }
+      }
+    }
+    if (!attackTarget) {
+      attackTarget = war.attackerNationId === army.nationId || counterattack
+        ? pickTargetProvince(world, army.nationId, enemyNationId)
+        : pickDefensiveProvince(world, army.nationId, enemyNationId);
+    }
     if (!attackTarget) {
       continue;
     }

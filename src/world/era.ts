@@ -1,4 +1,5 @@
 import type { World } from "./types";
+import { formatInteger } from "./formatPopulation";
 
 export type EraState = {
   nationId: string;
@@ -245,4 +246,67 @@ export function eraUnlockedKinds(era: string): string[] {
 export function isKindUnlockedByEra(kind: string, era: string): boolean {
   if (kind === "reino" && !isReinoEra(era)) return false;
   return eraUnlockedKinds(era).includes(kind);
+}
+
+// ================================================================
+// Requisitos para avanzar de era (spec/era-advancement-requirements.md).
+// El oro NO se valida aquí (lo maneja la rama existente de la transición).
+// La población es SIEMPRE habitantes vivos (Σ city.population), nunca el tope.
+// Entrar a dark_medieval no pide nada extra: solo oro (era oscura opcional).
+// ================================================================
+
+export type EraRequirement = {
+  minPueblos?: number;
+  minPoblacion?: number;
+  minReinosActivos?: number;
+};
+
+export const ERA_REQUIREMENTS: Record<string, EraRequirement> = {
+  ancient: { minPueblos: 15 },
+  medieval: { minPoblacion: 5000 },
+  modern: { minReinosActivos: 1 },
+  contemporary: { minPoblacion: 1000000 },
+};
+
+export function livePopulationOf(world: World, nationId: string): number {
+  return world.cities
+    .filter((c) => c.nationId === nationId)
+    .reduce((sum, c) => sum + c.population, 0);
+}
+
+export function checkEraRequirements(
+  upcomingEra: string,
+  world: World,
+  nationId: string,
+  reinos: Array<{ nationId: string; activo: boolean }>,
+): { met: boolean; faltan: string[] } {
+  const req = ERA_REQUIREMENTS[upcomingEra];
+  if (!req) return { met: true, faltan: [] };
+
+  const faltan: string[] = [];
+
+  if (req.minPueblos !== undefined) {
+    const pueblos = world.cities.filter(
+      (c) => c.nationId === nationId && (c.tipo ?? "pueblo") === "pueblo",
+    ).length;
+    if (pueblos < req.minPueblos) {
+      faltan.push(`${formatInteger(req.minPueblos - pueblos)} pueblos faltantes (tienes ${formatInteger(pueblos)})`);
+    }
+  }
+
+  if (req.minPoblacion !== undefined) {
+    const population = livePopulationOf(world, nationId);
+    if (population < req.minPoblacion) {
+      faltan.push(`${formatInteger(req.minPoblacion - population)} población faltante (tienes ${formatInteger(population)})`);
+    }
+  }
+
+  if (req.minReinosActivos !== undefined) {
+    const activos = reinos.filter((r) => r.nationId === nationId && r.activo).length;
+    if (activos < req.minReinosActivos) {
+      faltan.push(`${formatInteger(req.minReinosActivos - activos)} reino(s) faltante(s) (tienes ${formatInteger(activos)})`);
+    }
+  }
+
+  return { met: faltan.length === 0, faltan };
 }

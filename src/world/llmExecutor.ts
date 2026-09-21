@@ -3,9 +3,10 @@ import type { NationModelConfig, NationModelConfigs } from "./modelConfig";
 import { fetchOllama, normalizeChatEndpointUrl, providerPresetFor } from "./modelConfig";
 import { runAiaAgentTurn } from "./aiaAgentClient";
 import { debug } from "./debugLog";
-import { eraChangeCost, getNationEra, nextEra } from "./era";
+import { eraChangeCost, getNationEra, nextEra, checkEraRequirements } from "./era";
 import { densityPerTile, habitableTilesOf } from "./density";
 import { provinceHops } from "./carts";
+import { getFrontierProvinces } from "./diplomacy";
 
 const llmLog = debug.tag("llmExecutor");
 
@@ -32,6 +33,7 @@ export type LLMDecision = {
   diplomacy: string;
   era?: string;
   targetNationId?: string;
+  targetProvinceId?: string;
   targetTileId?: string;
   rationale?: string;
   cartMove?: { fromProvinceId: string; toProvinceId: string; carts: number };
@@ -192,8 +194,9 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   const stockpile = context.simulation.nationStockpiles[context.nationId];
   const policy = context.simulation.nationPolicies[context.nationId];
   const cities = context.world.cities.filter((c) => c.nationId === context.nationId);
-  const provinces = context.world.provinces.filter((p) => p.nationId === context.nationId);
-  const nationPopulation = cities.reduce((s, c) => s + c.population, 0);
+   const provinces = context.world.provinces.filter((p) => p.nationId === context.nationId);
+    const frontierProvinces = getFrontierProvinces(context.nationId, context.world, context.simulation.diplomacy);
+   const nationPopulation = cities.reduce((s, c) => s + c.population, 0);
 
   const eraStates = (context.simulation as any).eraState ?? {};
   const currentEra = getNationEra(context.nationId, eraStates);
@@ -201,6 +204,17 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   const eraCost = upcomingEra ? eraChangeCost(upcomingEra) : 0;
   const skipInfo = currentEra === "medieval"
     ? ` Or skip_dark to jump the optional dark age straight to modern for ${eraChangeCost("modern")} gold.`
+    : "";
+  // Requisitos no-oro de la próxima era + aviso de la oscura (la IA decide informada).
+  const simAnyEarly = context.simulation as any;
+  const reqCheck = upcomingEra
+    ? checkEraRequirements(upcomingEra, context.world, context.nationId, (simAnyEarly.reinos ?? []) as any[])
+    : { met: true, faltan: [] as string[] };
+  const reqInfo = upcomingEra && !reqCheck.met
+    ? ` Missing requirements: ${reqCheck.faltan.join("; ")} (stay until met).`
+    : "";
+  const darkWarn = currentEra === "medieval"
+    ? ` WARNING: entering the dark age crashes density 10000→500/tile (overpopulation → production falls to 10%); skipping avoids it.`
     : "";
 
   const enemyNations = context.world.nations
@@ -268,7 +282,7 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
   return [
     `You are the national decision maker of ${nation?.name ?? context.nationId} (id=${context.nationId}).`,
     `Turn: ${context.turnNumber}`,
-    `Your status: Population=${nationPopulation.toLocaleString()} | Cities=${cities.length} | Provinces=${provinces.length} | Gold=${Math.round(stockpile?.gold ?? 0)} | Era=${currentEra}${upcomingEra ? ` (next: ${upcomingEra} for ${eraCost} gold)` : " (máxima)"}`,
+    `Your status: Population=${nationPopulation.toLocaleString()} | Cities=${cities.length} | Provinces=${provinces.length} | Gold=${Math.round(stockpile?.gold ?? 0)} | Era=${currentEra}${upcomingEra ? ` (next: ${upcomingEra} for ${eraCost} gold)` : " (máxima)"}${reqInfo}`,
     ``,
     `Neutral territories available (${neutralProvinces.length} total): ${neutralInfo}`,
     `Peaceful expansion (peaceful_expand) costs only 1 gold per new city and never starts wars.`,
@@ -305,8 +319,8 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `  diplomacy:"seek_peace" + targetNationId: Negotiate a truce with a hostile nation.`,
     `  diplomacy:"none": No diplomatic action this turn.`,
     ``,
-    `  era:"advance_era": Pay gold to enter the next era (costs rise but production/exploration improve + unlocks).${skipInfo}`,
-    `  era:"skip_dark": Only from medieval: skip the optional dark age and jump straight to modern.`,
+    `  era:"advance_era": Pay gold to enter the next era (costs rise but production/exploration improve + unlocks). Only advances if era requirements are met.${skipInfo}${darkWarn}`,
+    `  era:"skip_dark": Only from medieval: skip the optional dark age and jump straight to modern (validates modern requirements).`,
     `  era:"stay": Remain in the current era.`,
     ``,
     `DECISION RULES — follow these in order:`,
@@ -319,15 +333,21 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `  - For control_city, control_resource, decisive_battle, declare_war, seek_alliance, seek_peace: targetNationId MUST be a valid Other nation ID from the list above`,
     `  - NEVER use your own id="${context.nationId}" as a target`,
     ``,
-    `Current policies: Expansion=${policy?.expansion?.policy ?? "unknown"}, Economy=${policy?.economy?.policy ?? "unknown"}, Diplomacy=${policy?.diplomacy?.policy ?? "unknown"}, Era=${(policy as any)?.era?.policy ?? "stay"}`,
-    ``,
-    `EXAMPLES of valid JSON responses:`,
+     `Current policies: Expansion=${policy?.expansion?.policy ?? "unknown"}, Economy=${policy?.economy?.policy ?? "unknown"}, Diplomacy=${policy?.diplomacy?.policy ?? "unknown"}, Era=${(policy as any)?.era?.policy ?? "stay"}`,
+     ``,
+     `Frontier provinces (yours, bordering enemies) — ONLY these can be attacked:`,
+     frontierProvinces.length > 0
+       ? frontierProvinces.map((p) => `    - ${p.id} (${p.name ?? "unknown"})`).join("\n")
+       : "    none",
+     `Use "targetProvinceId" with "declare_war"/"control_city"/"decisive_battle" to attack a frontier province. Omit or null for automated targeting.`,
+     ``,
+     `EXAMPLES of valid JSON responses:`,
     `  When neutral territory is available: {"expansion":"peaceful_expand","economy":"construction","diplomacy":"none","targetNationId":null,"rationale":"Colonizing neutral territory to grow peacefully"}`,
     `  When at war: {"expansion":"control_city","economy":"army_building","diplomacy":"declare_war","targetNationId":"enemy_nation_id","rationale":"Capturing cities to weaken the enemy"}`,
     `  When no expansion needed: {"expansion":"none","economy":"construction","diplomacy":"seek_alliance","era":"stay","targetNationId":null,"rationale":"Building infrastructure and alliances"}`,
     ``,
     "Respond ONLY with valid JSON, no explanation, no analysis, no reasoning text:",
-    '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null}',
+     '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","targetProvinceId":"frontier_province_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null}',
   ].join("\n");
 }
 
@@ -339,14 +359,15 @@ function parseDecision(raw: string): LLMDecision | null {
     if (fallback) {
       try {
         const parsed = JSON.parse(fallback[0]);
-        return {
-          expansion: parsed.expansion ?? "none",
-      targetTileId: parsed.targetTileId,
-          economy: parsed.economy ?? "construction",
-          diplomacy: parsed.diplomacy ?? "none",
-          era: parsed.era ?? "stay",
-          targetNationId: parsed.targetNationId ?? null,
-          rationale: parsed.rationale ?? "",
+     return {
+       expansion: parsed.expansion ?? "none",
+       targetTileId: parsed.targetTileId,
+       economy: parsed.economy ?? "construction",
+       diplomacy: parsed.diplomacy ?? "none",
+       era: parsed.era ?? "stay",
+       targetNationId: parsed.targetNationId ?? null,
+       targetProvinceId: parsed.targetProvinceId ?? undefined,
+       rationale: parsed.rationale ?? "",
         };
       } catch {}
     }
@@ -472,17 +493,18 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
     nationPolicies.economy = { ...nationPolicies.economy, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
   }
 
-  if (decision.diplomacy && validDiplomacies.has(decision.diplomacy) && decision.diplomacy !== "none") {
-    nationPolicies.diplomacy = {
-      policy: decision.diplomacy as any,
-      label: decision.diplomacy,
-      rationale: decision.rationale || "",
-      targetNationId: decision.targetNationId || undefined,
-      targetTileId: decision.targetTileId || undefined,
-      decidedAtMonth: context.turnNumber,
-      nextDecisionMonth: context.turnNumber + 2,
-    };
-  } else if (decision.diplomacy) {
+   if (decision.diplomacy && validDiplomacies.has(decision.diplomacy) && decision.diplomacy !== "none") {
+     nationPolicies.diplomacy = {
+       policy: decision.diplomacy as any,
+       label: decision.diplomacy,
+       rationale: decision.rationale || "",
+       targetNationId: decision.targetNationId || undefined,
+       targetProvinceId: decision.targetProvinceId || undefined,
+       targetTileId: decision.targetTileId || undefined,
+       decidedAtMonth: context.turnNumber,
+       nextDecisionMonth: context.turnNumber + 2,
+     };
+   } else if (decision.diplomacy) {
     nationPolicies.diplomacy = { ...nationPolicies.diplomacy, decidedAtMonth: context.turnNumber, nextDecisionMonth: context.turnNumber + 2 };
   }
 

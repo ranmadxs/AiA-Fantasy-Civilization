@@ -60,6 +60,16 @@ describe("caravana fundadora", () => {
   test("proyecto creado el mismo turno del cambio de era usa la era nueva", () => {    const world = buildDemoWorld("era-stale-001", { nationCount: 2, cityCount: 6 });
     const simulation = createInitialSimulationState(world);
     const nationId = world.nations[0].id;
+    // Requisito stone→ancient: 15 pueblos.
+    const prov = world.provinces.find((p) => p.nationId === nationId)!;
+    const have = world.cities.filter((c) => c.nationId === nationId && (c.tipo ?? "pueblo") === "pueblo").length;
+    for (let i = have; i < 15; i += 1) {
+      world.cities.push({
+        id: `pc-car-${i}`, name: `PC${i}`, nameEn: `PC${i}`, nameZh: `PC${i}`, nameEs: `PC${i}`, nameId: `pc${i}`,
+        nationId, provinceId: prov.id, x: 0, y: 0, isCapital: false,
+        population: 100, level: 1, tipo: "pueblo", tiles: 1,
+      } as any);
+    }
     simulation.nationPolicies[nationId].economy.policy = "construction";
     simulation.nationPolicies[nationId].era = {
       policy: "advance_era", label: "Advance Era", rationale: "test",
