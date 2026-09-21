@@ -35,6 +35,7 @@ import {
   pozoSpotEligible,
   pozoUpgradeEligible,
   progressConstruction,
+  stableUpgrade3Eligible,
   stableUpgradeEligible,
   trasladoOutcome,
   type ConstructionKind,
@@ -49,7 +50,7 @@ import {
 import { isReinoEra } from "./era";
 import { densityPerTile, habitableTilesOf } from "./density";
 import { maxLevelOf, tilesFor } from "./levelCaps";
-import { BUILDING_TILE_FOOTPRINT } from "./configDefaults";
+import { BUILDING_LIST, BUILDING_TILE_FOOTPRINT, MAX_PROJECTS_PER_NATION } from "./configDefaults";
 import {
   CART_INTERNAL_COST_GOLD,
   CART_UPKEEP_WOOD,
@@ -495,12 +496,11 @@ export function advanceConstruction(
       }
     }
     if (nationPolicies[nation.id]?.economy?.policy !== "construction") continue;
-    if (projects.some((p) => p.nationId === nation.id && p.status === "building")) continue;
-    // Cadena automática por prioridad: cuartel → establo → obra →
-    // mina carbón → aserradero → mina hierro → fábrica armas.
-    // Cada tipo se construye una vez por provincia con ciudad; mina de
-    // hierro y fábrica exigen era antigua; fábrica máx 1 por provincia.
-    // Saturado todo: obra en capital (comportamiento original).
+    if (projects.filter((p) => p.nationId === nation.id && p.status === "building").length >= MAX_PROJECTS_PER_NATION) continue;
+    // Cadena automática por prioridad: cuartel → granja → establo → obra →
+    // mina carbón → aserradero → pozo → mina hierro → fábrica armas.
+    // Hasta MAX_PROJECTS_PER_NATION en paralelo, sin repetir provincia en el turno.
+    // Órdenes explícitas LLM (upgrade/buildOrders) van primero, validadas.
     const ownedProvinces = world.provinces.filter((p) => p.nationId === nation.id);
     const nationEra = getNationEra(nation.id, nextEraState);
     const withCity = (p: { id: string }) =>
@@ -527,180 +527,272 @@ export function advanceConstruction(
       : intent === "ciudad" ? ["ciudad", ...chain.filter((k) => k !== "ciudad")]
       : intent === "reino" ? ["reino", ...chain.filter((k) => k !== "reino")]
       : chain;
-    let targetKind: ConstructionKind = "obra";
-    let targetProvinceId = nation.capitalProvinceId;
-    let isStableUpgrade = false;
-    let cartQuantity = 0;
-    const nationGroups = current.military?.[nation.id]?.armyGroups ?? [];
-    for (const kind of orderedChain) {
-      if (!isKindUnlockedByEra(kind, nationEra)) continue;
-      // Carretas: provincia propia con establo niv.3 + necesidad. Repetible.
-      if (kind === "carreta") {
-        const target = ownedProvinces.find((p) => {
-          const hasStable3 = aserraderos.some(
-            (a) => a.nationId === nation.id && a.provinceId === p.id && a.activa && (a.nivel ?? 1) >= 3,
-          );
-          return hasStable3 && provinceCartNeed(nationGroups, p.id) > 0;
-        });
-        if (target) {
-          targetKind = kind;
-          targetProvinceId = target.id;
-          break;
-        }
-        continue;
-      }
-      if (kind === "reino" && !canReino(targetProvinceId)) {
-        const target = ownedProvinces.find((p) => withCity(p) && canReino(p.id));
-        if (target) {
-          targetKind = kind;
-          targetProvinceId = target.id;
-          break;
-        }
-        continue;
-      }
-      // Mejora granja: exige 1 tile adyacente libre (1 tile/nivel, máx niv.10).
-      if (kind === "granja") {
-        const up = ownedProvinces
-          .map((p) => ({ p, elig: granjaUpgradeEligible(world, nation.id, p.id, granjas) }))
-          .find(({ elig }) => elig !== undefined);
-        if (up?.elig) {
-          targetKind = kind;
-          targetProvinceId = up.p.id;
-          break;
-        }
-      }
-      // Pozo: provincia propia con ciudad y tile libre sin veta (era antigua+).
-      if (kind === "pozo") {
-        const target = ownedProvinces.find((p) => {
-          if (!withCity(p)) return false;
-          if (projects.some((pr) => pr.nationId === nation.id && pr.provinceId === p.id && pr.kind === "pozo" && pr.status === "building")) return false;
-          const existing = pozos.find((z) => z.nationId === nation.id && z.provinceId === p.id && z.activa);
-          if (existing && (existing.nivel ?? 1) >= POZO_MAX_NIVEL) return false;
-          if (pozoUpgradeEligible(nation.id, p.id, pozos)) return true;
-          return pozoSpotEligible(world, p.id) !== undefined;
-        });
-        if (target) {
-          targetKind = kind;
-          targetProvinceId = target.id;
-          break;
-        }
-        continue;
-      }
-      // Mejora establo a niv.2: exige ciudad niv.2 + 3 tiles adyacentes.
-      if (kind === "stable") {
-        const up = ownedProvinces
-          .map((p) => ({ p, elig: stableUpgradeEligible(world, nation.id, p.id, aserraderos) }))
-          .find(({ elig }) => elig !== undefined);
-        if (up?.elig) {
-          targetKind = kind;
-          targetProvinceId = up.p.id;
-          isStableUpgrade = true;
-          break;
-        }
-      }
-      // Obra fundadora: provincia propia sin ciudad de la nación (caravana).
-      if (kind === "obra") {
-        const empty = ownedProvinces.find((p) => !withCity(p) && findFreeTile(p.id));
-        const origin = world.cities
-          .filter((c) => c.nationId === nation.id)
-          .sort((a, b) => b.population - a.population)[0];
-        if (empty && origin && origin.population >= 100) {
-          targetKind = kind;
-          targetProvinceId = empty.id;
-          break;
-        }
-      }
-      const target = ownedProvinces.find((p) =>
-        withCity(p) && (kind === "fabrica_armas" ? !hasFabrica(p.id) : !hasComplete(p.id, kind)),
-      );
-      if (target) {
-        // Pueblo no puede ir en tile ocupado por mina/aserradero: exige tile libre.
-        if ((kind === "obra" || kind === "ciudad") && !findFreeTile(target.id)) continue;
-        targetKind = kind;
-        targetProvinceId = target.id;
-        break;
-      }
-    }
-    // Usa la era ya actualizada este turno (nextEraState), no la vieja.
+    const buildingCount = () =>
+      projects.filter((p) => p.nationId === nation.id && p.status === "building").length;    const usedProvinces = new Set<string>(
+      projects.filter((p) => p.nationId === nation.id && p.status === "building").map((p) => p.provinceId),
+    );
+    // Era ya actualizada este turno (nextEraState), no la vieja.
     const era = getNationEra(nation.id, nextEraState);
-    const isCapital = targetProvinceId === nation.capitalProvinceId;
-    const spec = getConstructionSpec(targetKind, era, isCapital);
-    // Carretas: N = mín(necesidad, pagables), costo N×unitario en 1 turno.
-    if (targetKind === "carreta") {
-      const need = provinceCartNeed(nationGroups, targetProvinceId);
-      cartQuantity = Math.min(need, affordableUnits(spec.cost, stockpiles[nation.id] ?? { gold: 0, resources: {} }));
-      if (cartQuantity < 1) continue;
-    }
-    if (!canAffordFirstQuota(spec.cost, spec.turns, stockpiles[nation.id])) {
-      // 🚫 no iniciada por falta de fondos (1 vez por episodio de 6 meses).
-      if (!recentEvent((e) => e.kind === "construction" && e.id.startsWith(`event-construction-blocked-${nation.id}-`), 6)) {
-        events.push({
-          id: `event-construction-blocked-${nation.id}-${nextMonth}`,
-          month: nextMonth,
-          kind: "construction",
-          title: "🚫 Obra no iniciada",
-          description: `${nation.name} no pudo iniciar ${kindLabel[targetKind]} ${era} en ${world.provinceById.get(targetProvinceId)?.name ?? targetProvinceId}: ${missingQuota(spec.cost, spec.turns, stockpiles[nation.id])}. La obra espera fondos.`,
-          nationIds: [nation.id],
-        });
-      }
-      continue;
-    }
-    // Pueblo fundador exige origen con ≥100 hab; salen mín(100, pob-50)
-    // (el origen conserva piso 50, sin ping-pong).
-    // Si es desarrollo (provincia ya con ciudad), no descuenta.
-    let caravanOriginId: string | undefined;
-    let caravanColonos = 0;
-    if (targetKind === "obra") {
-      const hasCity = world.cities.some((c) => c.nationId === nation.id && c.provinceId === targetProvinceId);
-      if (!hasCity) {
-        const origin = world.cities
-          .filter((c) => c.nationId === nation.id)
-          .sort((a, b) => b.population - a.population)[0];
-        if (!origin || origin.population < 100) continue;
-        caravanColonos = Math.min(100, origin.population - 50);
-        if (caravanColonos < 10) continue;
-        origin.population -= caravanColonos;
-        caravanOriginId = origin.id;
-      }
-    }
-    const project = createConstructionProject(nation.id, targetProvinceId, era, isCapital, world.seed, nextMonth, targetKind);
-    if (caravanOriginId) {
-      project.cityId = caravanOriginId;
-      project.quantity = caravanColonos;
-    }
-    if (isStableUpgrade) {
-      // Mejora a niv.2: costo doble y 6 meses fijos.
-      const doubled: Record<string, number> = {};
-      for (const [k, v] of Object.entries(project.cost)) doubled[k] = Math.round((v ?? 0) * 2);
-      project.cost = doubled;
-      project.totalTurns = 6;
-      project.remainingTurns = 6;
-    }
-    if (targetKind === "carreta") {
-      // N carretas en 1 turno: costo unitario × N.
-      const scaled: Record<string, number> = {};
-      for (const [k, v] of Object.entries(project.cost)) scaled[k] = Math.round((v ?? 0) * cartQuantity);
-      project.cost = scaled;
-      project.totalTurns = 1;
-      project.remainingTurns = 1;
-      project.quantity = cartQuantity;
-    }
-    // Reserva de huella en tiles (mina 20, ciudad 15, reino 20, resto 1).
-    if (targetKind === "mina_carbon" || targetKind === "mina_hierro" || targetKind === "aserradero" || targetKind === "granja" || targetKind === "pozo" || targetKind === "obra" || targetKind === "ciudad" || targetKind === "reino") {
-      reserveTiles(targetProvinceId, BUILDING_TILE_FOOTPRINT[targetKind] ?? 1, project.id);
-    }
-    projects.push(project);
-    const province = world.provinceById.get(targetProvinceId);
-    events.push({
-      id: `event-construction-started-${project.id}`,
+    const nationGroups = current.military?.[nation.id]?.armyGroups ?? [];
+
+    const rejectedBuildOrder = (provinceId: string, reason: string): GameEvent => ({
+      id: `event-order-rejected-${nation.id}-${provinceId}-${nextMonth}`,
       month: nextMonth,
       kind: "construction",
-      title: caravanOriginId ? "🚚 Caravana en marcha" : "🚧 Construcción iniciada",
-      description: caravanOriginId
-        ? `${nation.name} envió ${caravanColonos} colonos de ${world.cityById.get(caravanOriginId)?.name ?? caravanOriginId} a fundar pueblo en ${province?.name ?? targetProvinceId} por ${formatConstructionBudget(project.cost)} (${project.remainingTurns} meses de viaje/obra).`
-        : `${nation.name} mandó a construir ${kindLabel[targetKind]} ${era} en ${province?.name ?? targetProvinceId} por ${formatConstructionBudget(project.cost)} (${project.remainingTurns} meses).`,
+      title: "🚫 Orden rechazada",
+      description: `${nation.name} ordenó obra en ${world.provinceById.get(provinceId)?.name ?? provinceId} pero fue rechazada: ${reason}.`,
       nationIds: [nation.id],
     });
+
+    const launchProject = (
+      targetKind: ConstructionKind,
+      targetProvinceId: string,
+      isStableUpgrade: boolean,
+      upgradeFrom: number,
+      cartQuantity: number,
+    ): boolean => {
+      const isCapital = targetProvinceId === nation.capitalProvinceId;
+      const spec = getConstructionSpec(targetKind, era, isCapital);
+      // Carretas: N = mín(necesidad, pagables), costo N×unitario en 1 turno.
+      if (targetKind === "carreta") {
+        const need = provinceCartNeed(nationGroups, targetProvinceId);
+        cartQuantity = Math.min(need, affordableUnits(spec.cost, stockpiles[nation.id] ?? { gold: 0, resources: {} }));
+        if (cartQuantity < 1) return false;
+      }
+      if (!canAffordFirstQuota(spec.cost, spec.turns, stockpiles[nation.id])) {
+        // 🚫 no iniciada por falta de fondos (1 vez por episodio de 6 meses).
+        if (!recentEvent((e) => e.kind === "construction" && e.id.startsWith(`event-construction-blocked-${nation.id}-`), 6)) {
+          events.push({
+            id: `event-construction-blocked-${nation.id}-${nextMonth}`,
+            month: nextMonth,
+            kind: "construction",
+            title: "🚫 Obra no iniciada",
+            description: `${nation.name} no pudo iniciar ${kindLabel[targetKind]} ${era} en ${world.provinceById.get(targetProvinceId)?.name ?? targetProvinceId}: ${missingQuota(spec.cost, spec.turns, stockpiles[nation.id])}. La obra espera fondos.`,
+            nationIds: [nation.id],
+          });
+        }
+        return false;
+      }
+      // Pueblo fundador exige origen con ≥100 hab; salen mín(100, pob-50)
+      // (el origen conserva piso 50, sin ping-pong).
+      // Si es desarrollo (provincia ya con ciudad), no descuenta.
+      let caravanOriginId: string | undefined;
+      let caravanColonos = 0;
+      if (targetKind === "obra") {
+        const hasCity = world.cities.some((c) => c.nationId === nation.id && c.provinceId === targetProvinceId);
+        if (!hasCity) {
+          const origin = world.cities
+            .filter((c) => c.nationId === nation.id)
+            .sort((a, b) => b.population - a.population)[0];
+          if (!origin || origin.population < 100) return false;
+          caravanColonos = Math.min(100, origin.population - 50);
+          if (caravanColonos < 10) return false;
+          origin.population -= caravanColonos;
+          caravanOriginId = origin.id;
+        }
+      }
+      const project = createConstructionProject(nation.id, targetProvinceId, era, isCapital, world.seed, nextMonth, targetKind);
+      if (caravanOriginId) {
+        project.cityId = caravanOriginId;
+        project.quantity = caravanColonos;
+      }
+      if (isStableUpgrade) {
+        // Mejora: costo ×2 (niv.2) o ×3 (niv.3), 6 meses fijos.
+        const factor = upgradeFrom >= 2 ? 3 : 2;
+        const scaled: Record<string, number> = {};
+        for (const [k, v] of Object.entries(project.cost)) scaled[k] = Math.round((v ?? 0) * factor);
+        project.cost = scaled;
+        project.totalTurns = 6;
+        project.remainingTurns = 6;
+      }
+      if (targetKind === "carreta") {
+        // N carretas en 1 turno: costo unitario × N.
+        const scaled: Record<string, number> = {};
+        for (const [k, v] of Object.entries(project.cost)) scaled[k] = Math.round((v ?? 0) * cartQuantity);
+        project.cost = scaled;
+        project.totalTurns = 1;
+        project.remainingTurns = 1;
+        project.quantity = cartQuantity;
+      }
+      // Reserva de huella en tiles (mina 20, ciudad 15, reino 20, resto 1).
+      if (targetKind === "mina_carbon" || targetKind === "mina_hierro" || targetKind === "aserradero" || targetKind === "granja" || targetKind === "pozo" || targetKind === "obra" || targetKind === "ciudad" || targetKind === "reino") {
+        reserveTiles(targetProvinceId, BUILDING_TILE_FOOTPRINT[targetKind] ?? 1, project.id);
+      }
+      projects.push(project);
+      usedProvinces.add(targetProvinceId);
+      const province = world.provinceById.get(targetProvinceId);
+      events.push({
+        id: `event-construction-started-${project.id}`,
+        month: nextMonth,
+        kind: "construction",
+        title: caravanOriginId ? "🚚 Caravana en marcha" : "🚧 Construcción iniciada",
+        description: caravanOriginId
+          ? `${nation.name} envió ${caravanColonos} colonos de ${world.cityById.get(caravanOriginId)?.name ?? caravanOriginId} a fundar pueblo en ${province?.name ?? targetProvinceId} por ${formatConstructionBudget(project.cost)} (${project.remainingTurns} meses de viaje/obra).`
+          : `${nation.name} mandó a construir ${kindLabel[targetKind]} ${era} en ${province?.name ?? targetProvinceId} por ${formatConstructionBudget(project.cost)} (${project.remainingTurns} meses).`,
+        nationIds: [nation.id],
+      });
+      return true;
+    };
+
+    const validateExplicitBuild = (
+      kind: ConstructionKind,
+      provinceId: string,
+    ): { ok: true; upgrade: boolean; upgradeFrom: number } | { ok: false; reason: string } => {
+      const province = ownedProvinces.find((p) => p.id === provinceId);
+      if (!province) return { ok: false, reason: "provincia ajena o inexistente" };
+      if (!isKindUnlockedByEra(kind, nationEra)) return { ok: false, reason: `${kind} bloqueado en era ${nationEra}` };
+      if (usedProvinces.has(provinceId)) return { ok: false, reason: "provincia ocupada este turno" };
+      if (projects.some((pr) => pr.nationId === nation.id && pr.provinceId === provinceId && pr.kind === kind && pr.status === "building")) {
+        return { ok: false, reason: "obra en curso" };
+      }
+      if (kind === "stable") {
+        const up2 = stableUpgradeEligible(world, nation.id, provinceId, aserraderos);
+        if (up2) return { ok: true, upgrade: true, upgradeFrom: 1 };
+        const up3 = stableUpgrade3Eligible(world, nation.id, provinceId, aserraderos);
+        if (up3) return { ok: true, upgrade: true, upgradeFrom: 2 };
+        if (withCity(province) && !hasComplete(provinceId, "stable")) return { ok: true, upgrade: false, upgradeFrom: 1 };
+        return { ok: false, reason: "establo al máximo o sin sitio" };
+      }
+      if (kind === "pozo") {
+        if (pozoUpgradeEligible(nation.id, provinceId, pozos)) return { ok: true, upgrade: false, upgradeFrom: 1 };
+        if (withCity(province) && pozoSpotEligible(world, provinceId)) return { ok: true, upgrade: false, upgradeFrom: 1 };
+        return { ok: false, reason: "pozo sin sitio" };
+      }
+      if (kind === "reino" && !canReino(provinceId)) return { ok: false, reason: "reino no permitido aquí" };
+      if (kind !== "carreta" && kind !== "obra" && hasComplete(provinceId, kind)) {
+        return { ok: false, reason: "ya construido" };
+      }
+      if ((kind === "obra" || kind === "ciudad") && !withCity(province) && !findFreeTile(provinceId)) {
+        return { ok: false, reason: "sin tile libre" };
+      }
+      return { ok: true, upgrade: false, upgradeFrom: 1 };
+    };
+
+    const pickChainTarget = (): { kind: ConstructionKind; provinceId: string; isStableUpgrade: boolean; upgradeFrom: number } | undefined => {
+      for (const kind of orderedChain) {
+        if (!isKindUnlockedByEra(kind, nationEra)) continue;
+        // Carretas: provincia propia con establo niv.3 + necesidad. Repetible.
+        if (kind === "carreta") {
+          const target = ownedProvinces.find((p) => {
+            if (usedProvinces.has(p.id)) return false;
+            const hasStable3 = aserraderos.some(
+              (a) => a.nationId === nation.id && a.provinceId === p.id && a.activa && (a.nivel ?? 1) >= 3,
+            );
+            return hasStable3 && provinceCartNeed(nationGroups, p.id) > 0;
+          });
+          if (target) {
+            return { kind, provinceId: target.id, isStableUpgrade: false, upgradeFrom: 1 };
+          }
+          continue;
+        }
+        if (kind === "reino") {
+          const capitalOk = canReino(nation.capitalProvinceId);
+          if (!capitalOk) {
+            const target = ownedProvinces.find((p) => !usedProvinces.has(p.id) && withCity(p) && canReino(p.id));
+            if (target) {
+              return { kind, provinceId: target.id, isStableUpgrade: false, upgradeFrom: 1 };
+            }
+            continue;
+          }
+        }
+        // Mejora granja: exige 1 tile adyacente libre (1 tile/nivel, máx niv.10).
+        if (kind === "granja") {
+          const up = ownedProvinces
+            .filter((p) => !usedProvinces.has(p.id))
+            .map((p) => ({ p, elig: granjaUpgradeEligible(world, nation.id, p.id, granjas) }))
+            .find(({ elig }) => elig !== undefined);
+          if (up?.elig) {
+            return { kind, provinceId: up.p.id, isStableUpgrade: false, upgradeFrom: 1 };
+          }
+        }
+        // Pozo: provincia propia con ciudad y tile libre sin veta (era antigua+).
+        if (kind === "pozo") {
+          const target = ownedProvinces.find((p) => {
+            if (usedProvinces.has(p.id)) return false;
+            if (!withCity(p)) return false;
+            if (projects.some((pr) => pr.nationId === nation.id && pr.provinceId === p.id && pr.kind === "pozo" && pr.status === "building")) return false;
+            const existing = pozos.find((z) => z.nationId === nation.id && z.provinceId === p.id && z.activa);
+            if (existing && (existing.nivel ?? 1) >= POZO_MAX_NIVEL) return false;
+            if (pozoUpgradeEligible(nation.id, p.id, pozos)) return true;
+            return pozoSpotEligible(world, p.id) !== undefined;
+          });
+          if (target) {
+            return { kind, provinceId: target.id, isStableUpgrade: false, upgradeFrom: 1 };
+          }
+          continue;
+        }
+        // Mejora establo a niv.2 (luego niv.3): ciudad niv.2+/3+ y tiles adyacentes.
+        if (kind === "stable") {
+          const up2 = ownedProvinces
+            .filter((p) => !usedProvinces.has(p.id))
+            .map((p) => ({ p, elig: stableUpgradeEligible(world, nation.id, p.id, aserraderos) }))
+            .find(({ elig }) => elig !== undefined);
+          if (up2?.elig) {
+            return { kind, provinceId: up2.p.id, isStableUpgrade: true, upgradeFrom: 1 };
+          }
+          const up3 = ownedProvinces
+            .filter((p) => !usedProvinces.has(p.id))
+            .map((p) => ({ p, elig: stableUpgrade3Eligible(world, nation.id, p.id, aserraderos) }))
+            .find(({ elig }) => elig !== undefined);
+          if (up3?.elig) {
+            return { kind, provinceId: up3.p.id, isStableUpgrade: true, upgradeFrom: 2 };
+          }
+        }
+        // Obra fundadora: provincia propia sin ciudad de la nación (caravana).
+        if (kind === "obra") {
+          const empty = ownedProvinces.find((p) => !usedProvinces.has(p.id) && !withCity(p) && findFreeTile(p.id));
+          const origin = world.cities
+            .filter((c) => c.nationId === nation.id)
+            .sort((a, b) => b.population - a.population)[0];
+          if (empty && origin && origin.population >= 100) {
+            return { kind, provinceId: empty.id, isStableUpgrade: false, upgradeFrom: 1 };
+          }
+        }
+        const target = ownedProvinces.find((p) =>
+          !usedProvinces.has(p.id) && withCity(p) && (kind === "fabrica_armas" ? !hasFabrica(p.id) : !hasComplete(p.id, kind)),
+        );
+        if (target) {
+          // Pueblo no puede ir en tile ocupado por mina/aserradero: exige tile libre.
+          if ((kind === "obra" || kind === "ciudad") && !findFreeTile(target.id)) continue;
+          return { kind, provinceId: target.id, isStableUpgrade: false, upgradeFrom: 1 };
+        }
+      }
+      return undefined;
+    };
+
+    // 1) Órdenes explícitas LLM (upgrade + buildOrders), validadas y one-shot.
+    const sidecar = nationPolicies[nation.id] as unknown as {
+      upgradeOrder?: { provinceId: string; kind: string };
+      buildOrdersList?: Array<{ provinceId: string; kind: string }>;
+    } | undefined;
+    const explicitOrders: Array<{ kind: ConstructionKind; provinceId: string }> = [];
+    if (sidecar?.upgradeOrder) {
+      explicitOrders.push({ kind: "stable", provinceId: sidecar.upgradeOrder.provinceId });
+      sidecar.upgradeOrder = undefined;
+    }
+    for (const b of sidecar?.buildOrdersList ?? []) {
+      explicitOrders.push({ kind: b.kind as ConstructionKind, provinceId: b.provinceId });
+    }
+    if (sidecar) sidecar.buildOrdersList = undefined;
+    for (const explicit of explicitOrders) {
+      if (buildingCount() >= MAX_PROJECTS_PER_NATION) break;
+      if (!BUILDING_LIST.includes(explicit.kind)) {
+        events.push(rejectedBuildOrder(explicit.provinceId, "kind desconocido"));
+        continue;
+      }
+      const check = validateExplicitBuild(explicit.kind, explicit.provinceId);
+      if (!check.ok) {
+        events.push(rejectedBuildOrder(explicit.provinceId, check.reason));
+        continue;
+      }
+      launchProject(explicit.kind, explicit.provinceId, check.upgrade, check.upgradeFrom, 0);
+    }
+    // 2) Cadena automática hasta completar cupo (máx 3, sin repetir provincia).
+    while (buildingCount() < MAX_PROJECTS_PER_NATION) {
+      const pick = pickChainTarget();
+      if (!pick) break;
+      if (!launchProject(pick.kind, pick.provinceId, pick.isStableUpgrade, pick.upgradeFrom, 0)) break;
+    }
   }
 
   const progressed = progressConstruction(projects, stockpiles, nextMonth);
@@ -1010,6 +1102,61 @@ export function advanceConstruction(
             nationIds: [done.nationId],
           });
         }
+      }
+    } else if (done.kind === "stable") {
+      // Establo: crea entrada niv.1 o sube la existente (máx niv.3 → carretas).
+      const existing = aserraderos.find(
+        (a) => a.nationId === done.nationId && a.provinceId === done.provinceId && a.activa && (a.nivel ?? 1) < 3,
+      );
+      if (existing) {
+        const from = existing.nivel ?? 1;
+        const wantTiles = from === 1 ? 3 : 5;
+        const anchor = existing.x !== undefined && existing.y !== undefined
+          ? { x: existing.x, y: existing.y }
+          : (findFreeTile(done.provinceId) ?? { x: 0, y: 0 });
+        const extra = findAdjacentFreeTiles(world, anchor.x, anchor.y, done.provinceId, wantTiles);
+        for (const s of extra) {
+          const tile = world.tiles.find((t) => t.x === s.x && t.y === s.y);
+          if (tile) tile.reservedBy = existing.id;
+        }
+        existing.nivel = from + 1;
+        existing.tiles = (existing.tiles ?? 1) + extra.length;
+        events.push({
+          id: `event-establo-upgraded-${existing.id}-${nextMonth}`,
+          month: nextMonth,
+          kind: "construction",
+          title: `🐴 Establo nivel ${existing.nivel}`,
+          description: `${nation?.name ?? done.nationId} amplió su establo en ${world.provinceById.get(done.provinceId)?.name ?? done.provinceId} a nivel ${existing.nivel} (${existing.tiles} tiles).` +
+            (existing.nivel >= 3 ? " Carretas desbloqueadas." : " Caballería garantizada 1 de cada 4 reclutas."),
+          nationIds: [done.nationId],
+        });
+      } else {
+        const stableId = `establo-${done.nationId}-${done.provinceId}-${nextMonth}`;
+        const reserved = world.tiles.find((t) => t.reservedBy === done.id);
+        const spot = reserved ?? findFreeTile(done.provinceId);
+        if (spot) {
+          const tile = world.tiles.find((t) => t.x === spot.x && t.y === spot.y);
+          if (tile) tile.reservedBy = stableId;
+        }
+        aserraderos.push({
+          id: stableId,
+          nationId: done.nationId,
+          provinceId: done.provinceId,
+          era: done.era,
+          activa: true,
+          nivel: 1,
+          x: spot?.x,
+          y: spot?.y,
+          tiles: 1,
+        });
+        events.push({
+          id: `event-establo-created-${stableId}`,
+          month: nextMonth,
+          kind: "construction",
+          title: "🐴 Establo operativo",
+          description: `${nation?.name ?? done.nationId} puso en marcha un establo en ${world.provinceById.get(done.provinceId)?.name ?? done.provinceId} (era ${done.era}). Caballería con establo.`,
+          nationIds: [done.nationId],
+        });
       }
     } else if (done.kind === "mina_hierro") {
       const minaId = `mina-hierro-${done.nationId}-${done.provinceId}-${nextMonth}`;

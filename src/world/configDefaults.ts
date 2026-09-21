@@ -1,6 +1,6 @@
 import type { ConstructionKind } from "./construction";
 
-export { type ConstructionKind } from "./construction";
+export type { ConstructionKind } from "./construction";
 
 export const ERA_LIST = [
   "stone",
@@ -27,6 +27,9 @@ export const BUILDING_LIST: ConstructionKind[] = [
   "reino",
   "carreta",
 ];
+
+// Máximo de obras en paralelo por nación (cada extra exige fondos para su cuota).
+export const MAX_PROJECTS_PER_NATION = 3;
 
 // Costos BASE de construcción (sin era): el costo real es base × factor de era.
 // Claves crudas (wood/stone/steel se normalizan al cobrar: timber/coal/iron).

@@ -444,6 +444,25 @@ export function stableUpgradeEligible(
   return { stable, city, spots };
 }
 
+/** Gate mejora establo a niv.3: establo niv.2 activo + ciudad niv.3 + 5 adyacentes libres. */
+export function stableUpgrade3Eligible(
+  world: World,
+  nationId: string,
+  provinceId: string,
+  aserraderos: Aserradero[],
+): { stable: Aserradero; city: City; spots: { x: number; y: number }[] } | undefined {
+  const stable = aserraderos.find(
+    (a) => a.nationId === nationId && a.provinceId === provinceId && a.activa && (a.nivel ?? 1) === 2,
+  );
+  if (!stable) return undefined;
+  const city = world.cities.find((c) => c.nationId === nationId && c.provinceId === provinceId && c.level >= 3);
+  if (!city) return undefined;
+  const anchor = stable.x !== undefined && stable.y !== undefined ? { x: stable.x, y: stable.y } : { x: city.x, y: city.y };
+  const spots = findAdjacentFreeTiles(world, anchor.x, anchor.y, provinceId, 5);
+  if (spots.length < 5) return undefined;
+  return { stable, city, spots };
+}
+
 /** Gate mejora granja: granja activa bajo niv.10 + 1 tile adyacente libre (1 tile/nivel). */
 export function granjaUpgradeEligible(
   world: World,

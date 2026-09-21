@@ -7,6 +7,7 @@ import { eraChangeCost, getNationEra, nextEra, checkEraRequirements } from "./er
 import { densityPerTile, habitableTilesOf } from "./density";
 import { provinceHops } from "./carts";
 import { isAttackableFrontier } from "./diplomacy";
+import { BUILDING_LIST } from "./configDefaults";
 
 const llmLog = debug.tag("llmExecutor");
 
@@ -43,6 +44,8 @@ export type LLMDecision = {
   doctrina?: { ejecutarPct: number };
   muster?: Array<{ cityId: string; units: Record<string, number>; stance?: string }>;
   move?: Array<{ groupId: string; destinationProvinceId: string; stance?: string }>;
+  upgrade?: { provinceId: string; kind: string };
+  buildOrders?: Array<{ provinceId: string; kind: string }>;
 };
 
 const decisionMap = new Map<string, LLMDecision>();
@@ -376,7 +379,8 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `  expansion:"none": Do not expand militarily this turn.`,
     ``,
     `  economy:"army_building": Build military units (needed before attacking).`,
-    `  economy:"construction": Build infrastructure to grow population and economy. Add "constructionIntent": pueblo (new pueblo needs origin>=100 pop) | ciudad (upgrade, medieval+) | reino (vassal 👑, medieval/dark only, needs 10 nation cities + 2 in province, 1/province) | auto.`,
+    `  economy:"construction": Build infrastructure to grow population and economy. Add "constructionIntent": pueblo (new pueblo needs origin>=100 pop) | ciudad (upgrade, medieval+) | reino (vassal 👑, medieval/dark only, needs 10 nation cities + 2 in province, 1/province) | auto. Up to 3 projects per nation per turn if funds allow.`,
+    `  "upgrade":{"provinceId":"...","kind":"stable"}: upgrade a stable (lvl1→2 needs lvl2 city + 3 tiles; lvl2→3 needs lvl3 city + 5 tiles, unlocks carts). "buildOrders":[{"provinceId":"...","kind":"granja"}]: explicit constructions, validated (own province, era-unlocked, funds). Invalid ones are rejected with a reason; the chain fills remaining slots.`,
     `  economy:"recovery": Conserve resources to recover population and stability.`,
     ``,
     `  Carts (optional, decide by need): your stables lvl.3 build carts (50 foot each, fast). "cartMove":{"fromProvinceId","toProvinceId","carts"} moves carts between YOUR provinces (1 gold each). "cartOffer":{"targetNationId","carts","pricePerCart"} sells to another nation: YOU set pricePerCart (must be >= 2 gold, always above the 1-gold cost, higher if you need gold). "acceptCartOfferId":"offer-id" accepts an incoming offer (pay on arrival). Omit or null when no trade needed.`,
@@ -426,7 +430,7 @@ function buildPrompt(context: NationTurnContext, config: NationModelConfig): str
     `  When no expansion needed: {"expansion":"none","economy":"construction","diplomacy":"seek_alliance","era":"stay","targetNationId":null,"rationale":"Building infrastructure and alliances"}`,
     ``,
     "Respond ONLY with valid JSON, no explanation, no analysis, no reasoning text:",
-     '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","targetProvinceId":"frontier_province_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null,"muster":null,"move":null}',
+     '{"expansion":"peaceful_expand"|"control_city"|"control_resource"|"decisive_battle"|"none","economy":"army_building"|"construction"|"recovery","diplomacy":"declare_war"|"seek_alliance"|"seek_peace"|"none","era":"advance_era"|"skip_dark"|"stay","targetNationId":"nation_id_or_null","targetProvinceId":"frontier_province_id_or_null","rationale":"brief reason","cartMove":null,"cartOffer":null,"acceptCartOfferId":null,"traslado":null,"doctrina":null,"muster":null,"move":null,"upgrade":null,"buildOrders":null}',
   ].join("\n");
 }
 
@@ -471,6 +475,8 @@ export function parseDecision(raw: string): LLMDecision | null {
       doctrina: normalizeDoctrina(parsed.doctrina),
       muster: normalizeMuster(parsed.muster),
       move: normalizeMove(parsed.move),
+      upgrade: normalizeUpgrade(parsed.upgrade),
+      buildOrders: normalizeBuildOrders(parsed.buildOrders),
     };
   } catch {
     const extract = (key: string): string | null => {
@@ -565,6 +571,27 @@ function normalizeMove(value: unknown): LLMDecision["move"] {
   return out.length > 0 ? out : undefined;
 }
 
+export function normalizeUpgrade(value: unknown): LLMDecision["upgrade"] {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.provinceId !== "string" || typeof v.kind !== "string") return undefined;
+  if (!(BUILDING_LIST as string[]).includes(v.kind)) return undefined;
+  return { provinceId: v.provinceId, kind: v.kind };
+}
+
+export function normalizeBuildOrders(value: unknown): LLMDecision["buildOrders"] {
+  if (!Array.isArray(value)) return undefined;
+  const out: NonNullable<LLMDecision["buildOrders"]> = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const v = item as Record<string, unknown>;
+    if (typeof v.provinceId !== "string" || typeof v.kind !== "string") continue;
+    if (!(BUILDING_LIST as string[]).includes(v.kind)) continue;
+    out.push({ provinceId: v.provinceId, kind: v.kind });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext): void {
   const nation = context.world.nationById.get(context.nationId);
   if (!nation) return;
@@ -653,6 +680,8 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
     doctrina?: LLMDecision["doctrina"];
     musterOrders?: LLMDecision["muster"];
     moveOrders?: LLMDecision["move"];
+    upgradeOrder?: LLMDecision["upgrade"];
+    buildOrdersList?: LLMDecision["buildOrders"];
   };
   cartPolicy.cartMove = decision.cartMove;
   cartPolicy.cartOffer = decision.cartOffer;
@@ -661,6 +690,8 @@ function applyDecisionToWorld(decision: LLMDecision, context: NationTurnContext)
   cartPolicy.doctrina = decision.doctrina;
   cartPolicy.musterOrders = decision.muster;
   cartPolicy.moveOrders = decision.move;
+  cartPolicy.upgradeOrder = decision.upgrade;
+  cartPolicy.buildOrdersList = decision.buildOrders;
 
   // NO inventar eventos war_declared aquí: la guerra real la crea
   // executeDiplomacyPoliciesWithEvents en resolveTurn a partir de nationPolicies.
