@@ -1,4 +1,5 @@
 import type { City, Nation, Province, Resource, Terrain, World } from "./types";
+import type { EventLang } from "./eventText";
 import { staticZh, phraseZh } from "./localizationZh";
 
 export type Language = "en" | "zh" | "es";
@@ -218,10 +219,14 @@ const staticEs: Record<string, string> = {
   Infantry: "Infantería",
   "Light Cavalry": "Caballería Ligera",
   "Heavy Cavalry": "Caballería Pesada",
+  Cavalry: "Caballería",
+  Levy: "Leva",
   militia: "milicia",
   infantry: "infantería",
   "light cavalry": "caballería ligera",
   "heavy cavalry": "caballería pesada",
+  cavalry: "caballería",
+  levy: "leva",
   attack: "ataque",
   defend: "defensa",
   garrison: "guarnición",
@@ -421,4 +426,12 @@ export function localizeTerrain(terrain: Terrain, language: Language) {
   if (language === "zh") return staticZh[english] ?? english;
   if (language === "es") return staticEs[english] ?? english;
   return english;
+}
+
+/** Palabra de unidad en minúsculas para frases ("infantry" → "infantería"). */
+export function unitWordL(englishLabel: string, language: Language | EventLang | undefined): string {
+  const lower = englishLabel.toLowerCase();
+  if (language === "es") return staticEs[lower] ?? lower;
+  if (language === "zh") return staticZh[lower] ?? lower;
+  return lower;
 }

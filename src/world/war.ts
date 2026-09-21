@@ -18,8 +18,8 @@ import { cartsNeededForUnits } from "./carts";
 import type { ConstructionProject, MinaDeCarbon, Aserradero, Reino, Granja, Pozo, ProvinceBuildings } from "./construction";
 import type { Province, Resource, Terrain, Tile, World } from "./types";
 import type { SpyNetwork } from "./spies";
-import { ev, nationNameL, provinceNameL, stanceLabelL, type EventLang } from "./eventText";
-import { localizeResource } from "./localization";
+import { ev, cityNameL, nationNameL, provinceNameL, stanceLabelL, type EventLang } from "./eventText";
+import { localizeResource, unitWordL } from "./localization";
 
 export type UnitType = "militia" | "infantry" | "lightCavalry" | "heavyCavalry" | "levy" | "caballeria";
 
@@ -267,6 +267,7 @@ export function advanceMilitaryEconomy(
   months: number,
   provinceBuildings?: ProvinceBuildings,
   stableLevels?: Record<string, number>,
+  lang?: EventLang,
 ): MilitaryEconomyUpdate {
   const events: GameEvent[] = [];
   const nextMilitary = cloneMilitary(currentMilitary);
@@ -292,7 +293,7 @@ export function advanceMilitaryEconomy(
       recruitmentQueue: [],
       units: emptyUnits(),
     };
-    army = completeRecruitment(world, army, currentMonth, events);
+    army = completeRecruitment(world, army, currentMonth, events, lang);
     const stockpile = nextStockpiles[nation.id] ?? { gold: 0, resources: {} };
 
     const atWar = diplomacy.wars.some(
@@ -352,6 +353,7 @@ export function advanceMilitaryEconomy(
       nation.id,
       currentMonth,
       events,
+      lang,
     );
     nextMilitary[nation.id] = recruited.army;
     nextStockpiles[nation.id] = development.stockpile;
@@ -1111,6 +1113,7 @@ function completeRecruitment(
   army: NationMilitary,
   currentMonth: number,
   events: GameEvent[],
+  lang?: EventLang,
 ) {
   const nextArmy = cloneArmy(army);
   const remainingOrders: RecruitmentOrder[] = [];
@@ -1127,11 +1130,14 @@ function completeRecruitment(
     nextArmy.cityGarrisons[order.cityId] = cityGarrison;
     events.push(buildWarEvent({
       currentMonth,
-      description: `${order.amount} ${unitStats[order.unitType].label.toLowerCase()} finished training in ${city?.name ?? order.cityId}.`,
+      description: ev(lang,
+        `${order.amount} ${unitStats[order.unitType].label.toLowerCase()} finished training in ${city?.name ?? order.cityId}.`,
+        `${order.amount} ${unitWordL(unitStats[order.unitType].label, lang)} terminaron su entrenamiento en ${city ? cityNameL(world, city.id, lang) : order.cityId}.`),
       id: `event-recruitment-completed-${order.id}-${currentMonth}`,
       kind: "recruitment_completed",
       nationIds: [order.nationId],
-      title: "Recruitment Completed",
+      title: ev(lang, "Recruitment Completed", "Reclutamiento completado"),
+      ...(lang ? { lang } : {}),
     }));
   }
 
@@ -1214,6 +1220,7 @@ function investSurplusInCities(
   nationId: string,
   currentMonth: number,
   events: GameEvent[],
+  lang?: EventLang,
 ) {
   const cities = world.cities
     .filter((city) => city.nationId === nationId)
@@ -1252,11 +1259,14 @@ function investSurplusInCities(
       city.population = projectedPop;
       events.push(buildWarEvent({
         currentMonth,
-        description: `${nationName(world, nationId)} invested surplus resources to develop ${city.name} to level ${city.level}.`,
+        description: ev(lang,
+          `${nationName(world, nationId)} invested surplus resources to develop ${city.name} to level ${city.level}.`,
+          `${nationNameL(world, nationId, lang)} invirtió excedentes para desarrollar ${cityNameL(world, city.id, lang)} a nivel ${city.level}.`),
         id: `event-city-developed-${city.id}-${currentMonth}`,
         kind: "city_developed",
         nationIds: [nationId],
-        title: "City Developed",
+        title: ev(lang, "City Developed", "Ciudad desarrollada"),
+        ...(lang ? { lang } : {}),
       }));
     }
     return { stockpile };

@@ -1449,7 +1449,7 @@ export function resolveTurn(world: World, current: SimulationState, nextMonth: n
     if (!a.activa) continue;
     stableLevels[a.provinceId] = Math.max(stableLevels[a.provinceId] ?? 0, a.nivel ?? 1);
   }
-  const militaryEconomy = advanceMilitaryEconomy(world, current.military, nationStockpiles, nationPolicies, current.diplomacy, nextMonth, 1, provinceBuildings, stableLevels);
+  const militaryEconomy = advanceMilitaryEconomy(world, current.military, nationStockpiles, nationPolicies, current.diplomacy, nextMonth, 1, provinceBuildings, stableLevels, lang);
   const spyUpdate = advanceSpyNetwork(current.spies, nationPolicies, current.nationRelations, world, nextMonth);
   const execution = executeDiplomacyPoliciesWithEvents(current.diplomacy, nationPolicies, world, nextMonth);
   const evaluation = evaluateDiplomaticProposalsWithEvents(execution.diplomacy, world, spyUpdate.relations, nextMonth);
